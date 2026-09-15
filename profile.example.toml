@@ -1,0 +1,6 @@
+# Partial transcription of supplied screenshots; complete these lists locally.
+start_url = "https://www.tiendacables.com/"
+max_pages = 20000
+user_agent = "CrawlPrototype/0.1 (Shopify SEO audit)"
+exclude_paths = ["/en/collections/vendors", "/collections/vendors", "/en/search", "/en/collections/types", "/en/blogs/noticias/tagged/", "/search"]
+skip_parameters = ["gad_source", "buyer_flags", "amp", "options[prefix]", "sort_by", "type", "gad_campaignid", "mot_S", "tw_kwdid", "variant", "tw_campaign", "fbclid"]

@@ -1,0 +1,4 @@
+/target/
+.env
+profile.local.toml
+*.sqlite*
