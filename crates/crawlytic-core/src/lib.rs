@@ -217,7 +217,7 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering};
         static N: AtomicU64 = AtomicU64::new(0);
         let path = std::env::temp_dir().join(format!(
-            "audit-core-env-{}-{}.env",
+            "crawlytic-core-env-{}-{}.env",
             std::process::id(),
             N.fetch_add(1, Ordering::Relaxed)
         ));
@@ -259,10 +259,10 @@ CRAWL_SIGNATURE_INPUT="sig1=(\"@authority\" \"@path\");keyid=\"abc\""
     #[test]
     fn environment_overrides_file_values() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let key = "AUDIT_CORE_TEST_ENV_OVERRIDE";
+        let key = "CRAWLYTIC_CORE_TEST_ENV_OVERRIDE";
         let previous = take_var(key);
         unsafe { std::env::set_var(key, "from-environment") };
-        let path = write_temp_env("AUDIT_CORE_TEST_ENV_OVERRIDE=from-file\n");
+        let path = write_temp_env("CRAWLYTIC_CORE_TEST_ENV_OVERRIDE=from-file\n");
         let result = load_env_file(&path);
         let loaded = std::env::var(key).ok();
         restore_var(key, previous);

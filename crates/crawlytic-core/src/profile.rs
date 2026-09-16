@@ -394,7 +394,7 @@ role = "own_bot"
 start_url = "https://www.tiendacables.com/"
 max_pages = 20000
 observed_pages_baseline = 3725
-user_agent = "TiendaCablesAudit/0.1 (self-hosted SEO audit)"
+user_agent = "Crawlytic/0.1 (self-hosted SEO audit)"
 discovery_mode = "homepage_internal_links"
 crawl_delay = "minimum"
 javascript_rendering = false
@@ -572,6 +572,7 @@ lists_complete = false
         let comparison = Profile::load(include_str!("../../../profile.comparison.toml")).unwrap();
         assert_eq!(own.role, ProfileRole::OwnBot);
         assert_eq!(comparison.role, ProfileRole::Comparison);
+        assert_eq!(own.user_agent, "Crawlytic/0.1 (self-hosted SEO audit)");
         assert!(!own.user_agent.contains("SiteAuditBot"));
         assert_eq!(comparison.user_agent, SEMRUSH_UA);
         assert!(!comparison.javascript_rendering);
