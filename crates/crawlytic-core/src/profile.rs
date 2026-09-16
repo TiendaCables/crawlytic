@@ -70,6 +70,8 @@ pub struct Profile {
     pub start_url: Url,
     pub max_pages: usize,
     pub observed_pages_baseline: usize,
+    /// HTTP User-Agent sent on requests and shown to operators.
+    /// Not a browser viewport, device width, or rendering target.
     pub user_agent: String,
     pub discovery_mode: DiscoveryMode,
     pub crawl_delay: CrawlDelay,

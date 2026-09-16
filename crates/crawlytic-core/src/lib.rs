@@ -2,6 +2,7 @@ mod auth;
 mod catalogue;
 mod crawl;
 mod discovery;
+mod engine;
 mod profile;
 mod robots;
 mod scope;
@@ -20,6 +21,11 @@ pub use catalogue::{
 pub use crawl::{
     CancelHandle, CrawlLimits, CrawlReport, Crawler, SitemapFileRecord, SitemapFileState,
     SitemapInventory, SitemapUrlRecord, UrlRecord, UrlState,
+};
+pub use engine::{
+    CommandHandle, CommandSendError, CrawlCommand, CrawlCounters, CrawlEvent,
+    DISCRETE_EVENT_CAPACITY, Diagnostic, DiagnosticKind, DisplayedUserAgent, Engine, EngineConfig,
+    FetchCompletion, ProgressSnapshot, SessionStatus, StatusEvent,
 };
 pub use profile::{
     CrawlDelay, DiscoveryMode, IgnoredParameterMode, Profile, ProfileRole, SCHEMA_VERSION,

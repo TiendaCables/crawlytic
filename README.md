@@ -49,9 +49,9 @@ locations are recorded and never receive credentials.
 
 ## Boundaries
 
-- `crawlytic-core`: profile, URL identity/scope, robots policy, Web Bot Auth transport, bounded crawl, homepage/sitemap discovery and SQLite run persistence; no terminal dependency.
+- `crawlytic-core`: profile, URL identity/scope, robots policy, Web Bot Auth transport, bounded crawl, homepage/sitemap discovery, SQLite run persistence, and typed start/cancel/resume commands with coalesced progress events; no terminal dependency.
 - `crawlytic`: Ratatui rendering, key input and background-task coordination.
-- Future interfaces can use the core without depending on Ratatui.
+- Future interfaces can use the core without depending on Ratatui. The displayed user agent is the HTTP User-Agent string, not a browser viewport.
 
 Implemented: versioned TOML profiles (own-bot and comparison), prefix vs subfolder
 exclusions, skip-vs-strip query policy, URL identity (relative links, HTML base href,
@@ -69,7 +69,12 @@ backoff with a retry budget, cancellation that classifies outstanding URLs),
 homepage-link discovery and independent sitemap inventory (indexes, gzip, size/depth/cycle
 bounds, cross-origin locations refused without forwarding credentials),
 SQLite persistence for runs, sanitized profile snapshots, URL states, fetch evidence,
-links, resource references, sitemap membership and idempotent findings. Checkers
+links, resource references, sitemap membership and idempotent findings. Typed crawl
+commands (start, cancel, resume) and coalesced progress events (run status, counters,
+fetch completion, diagnostics) so a headless client can drive a run; the discrete event
+queue is bounded and a slow consumer drops events instead of growing memory. Counters
+are unique URL records by persisted state and must reconcile with storage. Durable truth
+stays in SQLite; events are a live view. The displayed user agent is not a viewport. Checkers
 are not shipped; live evaluation is `unsupported` until owner issues land. Current 14
 September 2026 findings are stored separately from the historical "new issues" column.
 No-count rows are not failures. Duplicate fetch identities are scheduled once. Every URL
@@ -131,7 +136,9 @@ requests with bypass off, and an explicit owner-audit override retained in run
 metadata. Crawl fixtures cover duplicate identities, independent URL/queue/body caps,
 429/503 backoff, unsigned-fallback refusal, robots blocks, cancellation, homepage-link
 discovery, sitemap inventory (including gzip, cycles, oversized/parse/inaccessible files)
-and refused cross-origin sitemap locations. Persistence fixtures cover kill/restart resume
+and refused cross-origin sitemap locations. Engine fixtures cover a headless start/observe
+client, cancel/resume commands, counter reconciliation with persisted URL states, and a
+bounded event queue that drops when the consumer lags. Persistence fixtures cover kill/restart resume
 without duplicate findings, in-flight retry, secret-free stored settings, writer batching,
 optional HTML quotas, and visible disk-full/migration failures that leave partial runs
 incomplete. They do not contact the storefront.
