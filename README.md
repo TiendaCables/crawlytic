@@ -38,15 +38,21 @@ Captured lists are complete: 27 ignored parameter names and 21 excluded paths.
 URLs that carry a listed parameter are skipped entirely; `ignored_parameter_mode = "strip"` is a
 separate explicit behaviour. Path entries without a trailing slash are string
 prefixes (`/shoes` matches `/shoes-men`); a trailing slash is that folder only.
+Discovered hrefs keep the original link text, a fragment-stripped fetch identity, and an exact skip
+reason. Scheme, host and default port are normalized; distinct paths, query values, duplicate
+parameters and pagination are not collapsed. A canonical is never treated as proof two URLs are the
+same. Excluded and external targets remain in coverage and link relationships and are not fetched.
 
 ## Boundaries
 
-- `crawlytic-core`: profile, URL scope and Web Bot Auth transport; no terminal dependency.
+- `crawlytic-core`: profile, URL identity/scope, robots policy and Web Bot Auth transport; no terminal dependency.
 - `crawlytic`: Ratatui rendering, key input and background-task coordination.
 - Future interfaces can use the core without depending on Ratatui.
 
 Implemented: versioned TOML profiles (own-bot and comparison), prefix vs subfolder
-exclusions, skip-vs-strip query policy, Web Bot Auth transport with origin-locked
+exclusions, skip-vs-strip query policy, URL identity (relative links, HTML base href,
+fragment-stripped fetch keys, scheme/host/port normalization), coverage of skipped URLs
+without fetching them, Web Bot Auth transport with origin-locked
 headers, same-origin HTTPS redirects, one connection retry, Signature-Input expiry
 metadata, 401/403/429 diagnostics that separate observation from suspected cause,
 HTTP/TLS fixtures for header destinations, robots access policy as a separate layer
@@ -57,7 +63,7 @@ six result states). Checkers are not shipped; live evaluation is `unsupported` u
 owner issues land. Current 14 September 2026 findings are stored separately from the
 historical "new issues" column. No-count rows are not failures.
 
-Not implemented: crawl queue, sitemap ingestion, rule checkers, SQLite history,
+Not implemented: crawl queue, HTML link extraction, sitemap ingestion, rule checkers, SQLite history,
 scheduling, credential editing/storage, mobile rendering or JS.
 The page cap (20,000) and historical 3,725-page observation are not catalogue size.
 Weekly Monday is recorded without a time, timezone, or scheduler.
@@ -67,11 +73,14 @@ profiles keep robots and meta bypass off even with signed requests. Robots denia
 blocked evidence, not a broken page. Meta noindex is a distinct block kind and is not
 evaluated in this slice. Crawl-delay is recorded and is not access policy. Missing or
 unreachable robots.txt allows crawling and is not treated as a denial.
+Callers pass href and optional base href strings; this slice does not parse HTML.
+`page` is a distinct fetch identity and is skipped only because the TiendaCables profile
+lists it as an ignored parameter. Path slash variants and query order stay distinct.
 
 ## Next milestones
 
-1. Bounded queue, backoff, cancellation, discovery and per-URL reasons on this
-   transport and robots layer. Preserve skipped links for coverage without fetching
+1. Bounded queue, backoff, cancellation and homepage/sitemap discovery on this
+   transport, robots and URL-identity layer. Preserve skipped links for coverage without fetching
    excluded URLs.
 2. SQLite runs and homepage-based link depth; sitemaps as separate discovery evidence.
 3. Metadata/link/canonical checks with evidence; then the broader Semrush catalogue.

@@ -2,6 +2,7 @@ mod auth;
 mod catalogue;
 mod profile;
 mod robots;
+mod scope;
 mod transport;
 
 pub use auth::{
@@ -20,6 +21,10 @@ pub use profile::{
 pub use robots::{
     AllowReason, BlockKind, BlockedEvidence, RobotsCache, RobotsFetchState, RobotsFile,
     RobotsRunMetadata, UrlAccess, evaluate_url, product_token,
+};
+pub use scope::{
+    ClassifiedUrl, Coverage, CoverageLink, CoverageUrl, FetchIdentity, SKIP_MALFORMED,
+    SKIP_UNSUPPORTED_SCHEME, classify_absolute, classify_href,
 };
 pub use transport::{AccessError, FetchRecord, Probe, ResourceKind, SignedTransport, preflight};
 
