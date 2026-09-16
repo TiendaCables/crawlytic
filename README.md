@@ -45,7 +45,7 @@ same. Excluded and external targets remain in coverage and link relationships an
 
 ## Boundaries
 
-- `crawlytic-core`: profile, URL identity/scope, robots policy and Web Bot Auth transport; no terminal dependency.
+- `crawlytic-core`: profile, URL identity/scope, robots policy, Web Bot Auth transport and bounded crawl; no terminal dependency.
 - `crawlytic`: Ratatui rendering, key input and background-task coordination.
 - Future interfaces can use the core without depending on Ratatui.
 
@@ -59,11 +59,17 @@ HTTP/TLS fixtures for header destinations, robots access policy as a separate la
 (user-agent groups, wildcards, encodings, failed fetches, sitemap declarations),
 bounded signed sample of page/robots/sitemap, responsive terminal status, versioned
 rule catalogue v1 (97 transcribed checks plus limited AMP remainder, fixture contract,
-six result states). Checkers are not shipped; live evaluation is `unsupported` until
-owner issues land. Current 14 September 2026 findings are stored separately from the
-historical "new issues" column. No-count rows are not failures.
+six result states), bounded async crawl (frontier, worker pool, per-origin pace for
+`crawl_delay = minimum`, independent URL/queue/response-size caps, 429/503 Retry-After
+backoff with a retry budget, cancellation that classifies outstanding URLs). Checkers
+are not shipped; live evaluation is `unsupported` until owner issues land. Current 14
+September 2026 findings are stored separately from the historical "new issues" column.
+No-count rows are not failures. Callers offer discovered hrefs; duplicate fetch identities
+are scheduled once. Every offered URL ends fetched, excluded, blocked, failed or pending
+with a reason. A cancelled run is not complete. Authentication failures do not continue
+unsigned.
 
-Not implemented: crawl queue, HTML link extraction, sitemap ingestion, rule checkers, SQLite history,
+Not implemented: HTML link extraction, sitemap ingestion, rule checkers, SQLite history,
 scheduling, credential editing/storage, mobile rendering or JS.
 The page cap (20,000) and historical 3,725-page observation are not catalogue size.
 Weekly Monday is recorded without a time, timezone, or scheduler.
@@ -79,9 +85,8 @@ lists it as an ignored parameter. Path slash variants and query order stay disti
 
 ## Next milestones
 
-1. Bounded queue, backoff, cancellation and homepage/sitemap discovery on this
-   transport, robots and URL-identity layer. Preserve skipped links for coverage without fetching
-   excluded URLs.
+1. Homepage and sitemap discovery on this bounded crawl, transport, robots and
+   URL-identity layer. Preserve skipped links for coverage without fetching excluded URLs.
 2. SQLite runs and homepage-based link depth; sitemaps as separate discovery evidence.
 3. Metadata/link/canonical checks with evidence; then the broader Semrush catalogue.
 4. History, scheduled headless runs and exports. A web UI can follow independently.
@@ -114,7 +119,9 @@ Web Bot Auth header, including same-origin redirects, refused cross-origin and H
 downgrades, retries, 401/403/429 diagnostics and secret redaction. Robots fixtures
 cover user-agent selection, conflicting rules, encodings, failed fetches, signed
 requests with bypass off, and an explicit owner-audit override retained in run
-metadata. They do not contact the storefront.
+metadata. Crawl fixtures cover duplicate identities, independent URL/queue/body caps,
+429/503 backoff, unsigned-fallback refusal, robots blocks, and cancellation. They do
+not contact the storefront.
 
 A user-reported or local `p` sample is operator evidence only. It is not recorded in
 this repository, is not covered by the default `cargo test` run, and is not proof that

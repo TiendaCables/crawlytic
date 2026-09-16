@@ -9,10 +9,11 @@ anyhow = "1"
 dotenvy = "0.15.7"
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
 toml = "0.9"
 url = { version = "2", features = ["serde"] }
 
 [dev-dependencies]
 rcgen = "0.14"
 rustls = { version = "0.23", default-features = false, features = ["std", "aws_lc_rs"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }

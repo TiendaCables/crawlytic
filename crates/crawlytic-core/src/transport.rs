@@ -32,6 +32,7 @@ pub struct FetchRecord {
     pub bytes_sampled: usize,
     pub resource_kind: ResourceKind,
     pub credentials_attached: bool,
+    pub truncated: bool,
 }
 
 #[derive(Debug)]
@@ -50,6 +51,9 @@ pub struct AccessError {
     observation: String,
     suspected_cause: Option<String>,
     blocking: bool,
+    retryable: bool,
+    auth_failure: bool,
+    retry_after: Option<Duration>,
 }
 
 impl AccessError {
@@ -61,19 +65,53 @@ impl AccessError {
         self.suspected_cause.as_deref()
     }
 
+    pub fn is_retryable(&self) -> bool {
+        self.retryable
+    }
+
+    pub fn is_auth_failure(&self) -> bool {
+        self.auth_failure
+    }
+
+    pub fn retry_after(&self) -> Option<Duration> {
+        self.retry_after
+    }
+
     fn with_cause(observation: impl Into<String>, cause: impl Into<String>) -> Self {
         Self {
             observation: observation.into(),
             suspected_cause: Some(cause.into()),
             blocking: false,
+            retryable: false,
+            auth_failure: false,
+            retry_after: None,
         }
     }
 
-    fn blocking(observation: impl Into<String>, cause: impl Into<String>) -> Self {
+    fn auth(observation: impl Into<String>, cause: impl Into<String>) -> Self {
         Self {
             observation: observation.into(),
             suspected_cause: Some(cause.into()),
             blocking: true,
+            retryable: false,
+            auth_failure: true,
+            retry_after: None,
+        }
+    }
+
+    fn rate_limited(
+        observation: impl Into<String>,
+        cause: impl Into<String>,
+        retry_after: Option<Duration>,
+        blocking: bool,
+    ) -> Self {
+        Self {
+            observation: observation.into(),
+            suspected_cause: Some(cause.into()),
+            blocking,
+            retryable: true,
+            auth_failure: false,
+            retry_after,
         }
     }
 
@@ -94,6 +132,7 @@ impl Display for AccessError {
 
 impl std::error::Error for AccessError {}
 
+#[derive(Clone)]
 pub struct SignedTransport {
     client: Client,
     auth: WebBotAuth,
@@ -139,8 +178,17 @@ impl SignedTransport {
         url: &Url,
         kind: ResourceKind,
     ) -> std::result::Result<(FetchRecord, Vec<u8>), AccessError> {
+        self.fetch_with_body_limit(url, kind, SAMPLE_LIMIT).await
+    }
+
+    pub(crate) async fn fetch_with_body_limit(
+        &self,
+        url: &Url,
+        kind: ResourceKind,
+        max_bytes: usize,
+    ) -> std::result::Result<(FetchRecord, Vec<u8>), AccessError> {
         if self.auth.expired_now() {
-            return Err(AccessError::with_cause(
+            return Err(AccessError::auth(
                 "Web Bot Auth credentials are missing, malformed, or expired before the request was sent.",
                 format!(
                     "Unsigned fallback is disabled. {}",
@@ -177,7 +225,7 @@ impl SignedTransport {
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("")
                 .to_owned();
-            let sample = read_sample(response).await?;
+            let (sample, truncated) = read_sample(response, max_bytes.max(1)).await?;
             if kind == ResourceKind::Page {
                 ensure_html_page(&current, status, &content_type, &sample)?;
             } else if kind != ResourceKind::Robots
@@ -198,6 +246,7 @@ impl SignedTransport {
                     bytes_sampled: sample.len(),
                     resource_kind: kind,
                     credentials_attached: true,
+                    truncated,
                 },
                 sample,
             ));
@@ -351,39 +400,78 @@ fn diagnose_status(
     retry_after: Option<&reqwest::header::HeaderValue>,
 ) -> std::result::Result<(), AccessError> {
     match status.as_u16() {
-        401 => Err(AccessError::blocking(
+        401 => Err(AccessError::auth(
             format!(
                 "HTTP 401 from {url} after attaching Signature, Signature-Input and Signature-Agent to the approved HTTPS origin"
             ),
-            "Shopify may have rejected the signature, the credentials may be expired or bound to another host, or another access control may apply. A 401 is not proof of the specific cause.",
+            "Shopify may have rejected the signature, the credentials may be expired or bound to another host, or another access control may apply. A 401 is not proof of the specific cause. Unsigned fallback is disabled.",
         )),
-        403 => Err(AccessError::blocking(
+        403 => Err(AccessError::auth(
             format!(
                 "HTTP 403 from {url} after attaching Signature, Signature-Input and Signature-Agent to the approved HTTPS origin"
             ),
-            "The origin refused access. This may be an invalid signature, a WAF or bot challenge, or another control. A 403 is not proof of the specific cause.",
+            "The origin refused access. This may be an invalid signature, a WAF or bot challenge, or another control. A 403 is not proof of the specific cause. Unsigned fallback is disabled.",
         )),
         429 => {
+            let parsed = parse_retry_after(retry_after);
             let retry = retry_after
                 .and_then(|value| value.to_str().ok())
                 .map(|value| format!(" Retry-After={value}."))
                 .unwrap_or_default();
-            Err(AccessError::blocking(
+            Err(AccessError::rate_limited(
                 format!("HTTP 429 from {url}.{retry}"),
                 "The origin asked for a slower rate. Rate limiting may be independent of signature validity.",
+                parsed,
+                true,
+            ))
+        }
+        503 => {
+            let parsed = parse_retry_after(retry_after);
+            let retry = retry_after
+                .and_then(|value| value.to_str().ok())
+                .map(|value| format!(" Retry-After={value}."))
+                .unwrap_or_default();
+            Err(AccessError::rate_limited(
+                format!("HTTP 503 from {url}.{retry}"),
+                "The origin is unavailable. Bounded backoff may retry the signed request; unsigned fallback is disabled.",
+                parsed,
+                false,
             ))
         }
         _ => Ok(()),
     }
 }
 
-async fn read_sample(mut response: reqwest::Response) -> std::result::Result<Vec<u8>, AccessError> {
+fn parse_retry_after(retry_after: Option<&reqwest::header::HeaderValue>) -> Option<Duration> {
+    let value = retry_after.and_then(|value| value.to_str().ok())?;
+    value
+        .parse::<u64>()
+        .ok()
+        .map(|secs| Duration::from_secs(secs.min(300)))
+}
+
+async fn read_sample(
+    mut response: reqwest::Response,
+    max_bytes: usize,
+) -> std::result::Result<(Vec<u8>, bool), AccessError> {
     let mut sample = Vec::new();
-    while sample.len() < SAMPLE_LIMIT {
+    let mut truncated = false;
+    loop {
+        if sample.len() >= max_bytes {
+            truncated = true;
+            break;
+        }
         match response.chunk().await {
             Ok(Some(chunk)) => {
-                let take = chunk.len().min(SAMPLE_LIMIT - sample.len());
+                if chunk.is_empty() {
+                    continue;
+                }
+                let take = chunk.len().min(max_bytes - sample.len());
                 sample.extend_from_slice(&chunk[..take]);
+                if take < chunk.len() {
+                    truncated = true;
+                    break;
+                }
             }
             Ok(None) => break,
             Err(_) => {
@@ -394,7 +482,7 @@ async fn read_sample(mut response: reqwest::Response) -> std::result::Result<Vec
             }
         }
     }
-    Ok(sample)
+    Ok((sample, truncated))
 }
 
 fn ensure_html_page(
