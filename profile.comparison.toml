@@ -15,6 +15,8 @@ observed_pages_baseline = 3725
 
 user_agent = "Mozilla/5.0 (iPhone; CPU iPhone OS 6_0 like Mac OS X) AppleWebKit/536.26 (KHTML, like Gecko) Version/6.0 Mobile/10A5376e Safari/8536.25 (compatible; SiteAuditBot/0.97; +http://www.semrush.com/bot.html)"
 
+# Website: homepage internal links. Also: sitemap, combined.
+# Sitemaps are independent inventory and never assign click depth.
 discovery_mode = "homepage_internal_links"
 # Semrush showed "minimum"; no numeric rate was exposed.
 crawl_delay = "minimum"

@@ -1,21 +1,28 @@
-//! Bounded async crawl: frontier, paced workers, backoff and cancellation.
+//! Bounded async crawl: frontier, paced workers, backoff, cancellation and
+//! discovery.
 //!
-//! Discovery (HTML links, sitemaps) is a later slice. Callers offer URLs.
-//! Duplicate identities are not scheduled twice. Caps for unique fetches, queue
-//! depth and response size are independent. `crawl_delay = minimum` is a paced
-//! policy with bounded concurrency, not an unbounded worker pool.
+//! Website mode starts at the homepage and follows raw HTML `<a href>` links.
+//! Sitemaps are independent inventory: they never create a navigation edge or
+//! assign click depth. Duplicate identities are not scheduled twice. Caps for
+//! unique fetches, queue depth, response size and sitemap expansion are
+//! independent. `crawl_delay = minimum` is a paced policy with bounded
+//! concurrency, not an unbounded worker pool.
 
 use crate::auth::WebBotAuth;
+use crate::discovery::{
+    ParsedSitemap, decode_sitemap_body, extract_navigational_links, parse_sitemap_xml,
+};
 use crate::profile::Profile;
 use crate::robots::{AllowReason, RobotsCache, RobotsFile, RobotsRunMetadata, UrlAccess};
-use crate::scope::{ClassifiedUrl, Coverage, FetchIdentity};
+use crate::scope::{ClassifiedUrl, Coverage, CoverageLink, FetchIdentity, classify_href};
 use crate::transport::{ResourceKind, SignedTransport};
 use anyhow::Result;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::Notify;
+use url::Url;
 
 pub const REASON_QUEUED: &str = "Queued";
 pub const REASON_QUEUE_CAP: &str = "Queue cap";
@@ -25,6 +32,14 @@ pub const REASON_FETCHED: &str = "Fetched";
 pub const REASON_TRUNCATED: &str = "Fetched; response truncated at size cap";
 pub const REASON_RETRY_BUDGET: &str = "Retry budget exhausted";
 pub const REASON_AUTH: &str = "Authentication failure; unsigned fallback is disabled";
+pub const REASON_SITEMAP_CROSS_ORIGIN: &str =
+    "Cross-origin sitemap; explicit scope required; credentials were not forwarded";
+pub const REASON_SITEMAP_CYCLE: &str = "Sitemap cycle";
+pub const REASON_SITEMAP_DEPTH: &str = "Sitemap index depth cap";
+pub const REASON_SITEMAP_OVERSIZED: &str = "Sitemap exceeded size cap";
+pub const REASON_SITEMAP_PARSE: &str = "Sitemap parse error";
+pub const REASON_SITEMAP_INACCESSIBLE: &str = "Sitemap inaccessible";
+pub const REASON_SITEMAP_FILE_CAP: &str = "Sitemap file cap";
 
 #[derive(Clone)]
 pub struct CancelHandle {
@@ -74,6 +89,9 @@ pub struct CrawlLimits {
     pub max_urls: usize,
     pub max_queue: usize,
     pub max_response_bytes: usize,
+    pub max_sitemap_bytes: usize,
+    pub max_sitemap_depth: usize,
+    pub max_sitemap_files: usize,
     pub retry_budget: usize,
     pub min_delay: Duration,
     pub concurrency: usize,
@@ -88,6 +106,9 @@ impl CrawlLimits {
             max_urls: profile.max_pages,
             max_queue: 1024,
             max_response_bytes: 65_536,
+            max_sitemap_bytes: 1_048_576,
+            max_sitemap_depth: 4,
+            max_sitemap_files: 64,
             retry_budget: 3,
             min_delay: Duration::from_millis(100),
             concurrency: 2,
@@ -140,6 +161,45 @@ pub struct UrlRecord {
     pub identity: Option<FetchIdentity>,
     pub state: UrlState,
     pub reason: String,
+    pub click_depth: Option<u32>,
+    pub via_website: bool,
+    pub via_sitemap: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SitemapFileState {
+    Fetched,
+    Inaccessible,
+    ParseError,
+    Oversized,
+    Cycle,
+    DepthLimit,
+    CrossOrigin,
+    Blocked,
+    Capped,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SitemapFileRecord {
+    pub url: String,
+    pub identity: Option<FetchIdentity>,
+    pub state: SitemapFileState,
+    pub reason: String,
+    pub listed_urls: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SitemapUrlRecord {
+    pub original: String,
+    pub identity: Option<FetchIdentity>,
+    pub skip_reason: Option<String>,
+    pub source_sitemap: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SitemapInventory {
+    pub files: Vec<SitemapFileRecord>,
+    pub urls: Vec<SitemapUrlRecord>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -148,6 +208,8 @@ pub struct CrawlReport {
     pub cancelled: bool,
     pub urls: Vec<UrlRecord>,
     pub robots: Option<RobotsRunMetadata>,
+    pub sitemap: SitemapInventory,
+    pub links: Vec<CoverageLink>,
 }
 
 impl CrawlReport {
@@ -207,29 +269,16 @@ impl Crawler {
     pub fn offer(&mut self, href: &str) -> &UrlRecord {
         let classified = self.coverage.seed(&self.profile, href);
         let key = record_key(&classified);
-        if self.records.contains_key(&key) {
-            return self.records.get(&key).expect("inserted URL record");
-        }
-        let identity = classified.identity.clone();
-        let (state, reason, enqueue) = if let Some(skip) = classified.skip_reason {
-            (UrlState::Excluded, skip.to_owned(), false)
-        } else if slots_used(&self.records) >= self.limits.max_urls {
-            (UrlState::Pending, REASON_URL_CAP.to_owned(), false)
-        } else if self.frontier.len() >= self.limits.max_queue {
-            (UrlState::Pending, REASON_QUEUE_CAP.to_owned(), false)
-        } else {
-            (UrlState::Pending, REASON_QUEUED.to_owned(), true)
-        };
-        if enqueue && let Some(identity) = &identity {
-            self.frontier.push_back(identity.clone());
-        }
-        self.records.insert(
-            key.clone(),
-            UrlRecord {
-                original: classified.original,
-                identity,
-                state,
-                reason,
+        queue_page(
+            &mut self.records,
+            &mut self.frontier,
+            &self.limits,
+            PageOffer {
+                classified,
+                click_depth: None,
+                via_website: true,
+                via_sitemap: false,
+                enqueue_fetch: true,
             },
         );
         self.records.get(&key).expect("inserted URL record")
@@ -244,7 +293,14 @@ impl Crawler {
             Ok(file) => Some(file),
             Err(err) if err.is_auth_failure() => {
                 reclassify_queued(&mut self.records, UrlState::Failed, REASON_AUTH);
-                return report(&self.records, false, self.cancel.is_cancelled(), None);
+                return report(
+                    &self.records,
+                    false,
+                    self.cancel.is_cancelled(),
+                    None,
+                    SitemapInventory::default(),
+                    self.coverage.links(),
+                );
             }
             Err(_) => None,
         };
@@ -252,14 +308,67 @@ impl Crawler {
             .as_ref()
             .map(|file| file.metadata(&self.profile, &self.profile.start_url));
 
+        if self.profile.discovery_mode.follows_website_links() && self.records.is_empty() {
+            let start = self.profile.start_url.as_str().to_owned();
+            let classified = self.coverage.seed(&self.profile, &start);
+            queue_page(
+                &mut self.records,
+                &mut self.frontier,
+                &self.limits,
+                PageOffer {
+                    classified,
+                    click_depth: Some(0),
+                    via_website: true,
+                    via_sitemap: false,
+                    enqueue_fetch: true,
+                },
+            );
+        }
+
+        let sitemap = match inventory_sitemaps(
+            &self.transport,
+            &self.profile,
+            &self.limits,
+            &self.cancel,
+            robots_file.as_ref(),
+            &mut self.records,
+            &mut self.frontier,
+            &mut self.coverage,
+        )
+        .await
+        {
+            Ok(inventory) => inventory,
+            Err(inventory) => {
+                reclassify_queued(&mut self.records, UrlState::Failed, REASON_AUTH);
+                stamp_sitemap_provenance(&mut self.records, &inventory);
+                return report(
+                    &self.records,
+                    false,
+                    self.cancel.is_cancelled(),
+                    robots_meta,
+                    inventory,
+                    self.coverage.links(),
+                );
+            }
+        };
+
         if self.cancel.is_cancelled() {
             reclassify_queued(&mut self.records, UrlState::Pending, REASON_CANCELLED);
-            return report(&self.records, false, true, robots_meta);
+            stamp_sitemap_provenance(&mut self.records, &sitemap);
+            return report(
+                &self.records,
+                false,
+                true,
+                robots_meta,
+                sitemap,
+                self.coverage.links(),
+            );
         }
 
         let shared = Arc::new(tokio::sync::Mutex::new(RunState {
             records: std::mem::take(&mut self.records),
             frontier: std::mem::take(&mut self.frontier),
+            coverage: std::mem::take(&mut self.coverage),
             auth_failed: false,
         }));
         let gate = Arc::new(tokio::sync::Mutex::new(None::<tokio::time::Instant>));
@@ -343,14 +452,32 @@ impl Crawler {
         }
         self.records = std::mem::take(&mut state.records);
         self.frontier = std::mem::take(&mut state.frontier);
-        report(&self.records, !cancelled, cancelled, robots_meta)
+        self.coverage = std::mem::take(&mut state.coverage);
+        stamp_sitemap_provenance(&mut self.records, &sitemap);
+        report(
+            &self.records,
+            !cancelled,
+            cancelled,
+            robots_meta,
+            sitemap,
+            self.coverage.links(),
+        )
     }
 }
 
 struct RunState {
     records: BTreeMap<String, UrlRecord>,
     frontier: VecDeque<FetchIdentity>,
+    coverage: Coverage,
     auth_failed: bool,
+}
+
+struct PageOffer {
+    classified: ClassifiedUrl,
+    click_depth: Option<u32>,
+    via_website: bool,
+    via_sitemap: bool,
+    enqueue_fetch: bool,
 }
 
 enum WorkerOut {
@@ -417,13 +544,16 @@ async fn process_one(
         };
 
         match result {
-            Ok((record, _)) => {
+            Ok((record, body)) => {
                 let reason = if record.truncated {
                     REASON_TRUNCATED
                 } else {
                     REASON_FETCHED
                 };
                 set_record(&shared, &identity, UrlState::Fetched, reason).await;
+                if profile.discovery_mode.follows_website_links() {
+                    discover_html_links(&profile, &limits, &identity, &body, &shared).await;
+                }
                 return WorkerOut::Done;
             }
             Err(err) if err.is_auth_failure() => {
@@ -515,13 +645,376 @@ fn report(
     completed: bool,
     cancelled: bool,
     robots: Option<RobotsRunMetadata>,
+    sitemap: SitemapInventory,
+    links: &[CoverageLink],
 ) -> CrawlReport {
     CrawlReport {
         completed,
         cancelled,
         urls: records.values().cloned().collect(),
         robots,
+        sitemap,
+        links: links.to_vec(),
     }
+}
+
+fn stamp_sitemap_provenance(records: &mut BTreeMap<String, UrlRecord>, sitemap: &SitemapInventory) {
+    let members: BTreeSet<String> = sitemap
+        .urls
+        .iter()
+        .filter_map(|listed| listed.identity.as_ref().map(identity_key))
+        .collect();
+    for record in records.values_mut() {
+        if let Some(identity) = &record.identity
+            && members.contains(&identity_key(identity))
+        {
+            record.via_sitemap = true;
+        }
+    }
+}
+
+fn min_depth(current: Option<u32>, offered: Option<u32>) -> Option<u32> {
+    match (current, offered) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    }
+}
+
+fn queue_page(
+    records: &mut BTreeMap<String, UrlRecord>,
+    frontier: &mut VecDeque<FetchIdentity>,
+    limits: &CrawlLimits,
+    offer: PageOffer,
+) {
+    let key = record_key(&offer.classified);
+    if let Some(existing) = records.get_mut(&key) {
+        existing.via_website |= offer.via_website;
+        existing.via_sitemap |= offer.via_sitemap;
+        existing.click_depth = min_depth(existing.click_depth, offer.click_depth);
+        return;
+    }
+    if !offer.enqueue_fetch {
+        return;
+    }
+    let identity = offer.classified.identity.clone();
+    let (state, reason, enqueue) = if let Some(skip) = offer.classified.skip_reason {
+        (UrlState::Excluded, skip.to_owned(), false)
+    } else if slots_used(records) >= limits.max_urls {
+        (UrlState::Pending, REASON_URL_CAP.to_owned(), false)
+    } else if frontier.len() >= limits.max_queue {
+        (UrlState::Pending, REASON_QUEUE_CAP.to_owned(), false)
+    } else {
+        (UrlState::Pending, REASON_QUEUED.to_owned(), true)
+    };
+    if enqueue && let Some(identity) = &identity {
+        frontier.push_back(identity.clone());
+    }
+    records.insert(
+        key,
+        UrlRecord {
+            original: offer.classified.original,
+            identity,
+            state,
+            reason,
+            click_depth: offer.click_depth,
+            via_website: offer.via_website,
+            via_sitemap: offer.via_sitemap,
+        },
+    );
+}
+
+async fn discover_html_links(
+    profile: &Profile,
+    limits: &CrawlLimits,
+    from: &FetchIdentity,
+    body: &[u8],
+    shared: &tokio::sync::Mutex<RunState>,
+) {
+    let html = String::from_utf8_lossy(body);
+    let links = extract_navigational_links(&html);
+    let document_url = from.as_url().clone();
+    let mut state = shared.lock().await;
+    let RunState {
+        records,
+        frontier,
+        coverage,
+        ..
+    } = &mut *state;
+    let from_depth = records
+        .get(&identity_key(from))
+        .and_then(|record| record.click_depth);
+    let child_depth = from_depth.map(|depth| depth.saturating_add(1));
+    for href in &links.hrefs {
+        let classified = coverage.observe_link(
+            profile,
+            from,
+            &document_url,
+            links.base_href.as_deref(),
+            href,
+        );
+        queue_page(
+            records,
+            frontier,
+            limits,
+            PageOffer {
+                classified,
+                click_depth: child_depth,
+                via_website: true,
+                via_sitemap: false,
+                enqueue_fetch: true,
+            },
+        );
+    }
+}
+
+fn sitemap_file(
+    url: String,
+    identity: Option<FetchIdentity>,
+    state: SitemapFileState,
+    reason: impl Into<String>,
+    listed_urls: usize,
+) -> SitemapFileRecord {
+    SitemapFileRecord {
+        url,
+        identity,
+        state,
+        reason: reason.into(),
+        listed_urls,
+    }
+}
+
+fn conventional_sitemap(start: &Url) -> Url {
+    let mut url = start.clone();
+    url.set_path("/sitemap.xml");
+    url.set_query(None);
+    url.set_fragment(None);
+    url
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn inventory_sitemaps(
+    transport: &SignedTransport,
+    profile: &Profile,
+    limits: &CrawlLimits,
+    cancel: &CancelHandle,
+    robots_file: Option<&RobotsFile>,
+    records: &mut BTreeMap<String, UrlRecord>,
+    frontier: &mut VecDeque<FetchIdentity>,
+    coverage: &mut Coverage,
+) -> Result<SitemapInventory, SitemapInventory> {
+    let mut inventory = SitemapInventory::default();
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut queue: VecDeque<(String, Url, usize)> = VecDeque::new();
+    let seeds: Vec<Url> = match robots_file {
+        Some(file) if !file.sitemaps().is_empty() => file.sitemaps().to_vec(),
+        _ if profile.discovery_mode.enqueues_sitemap_urls() => {
+            vec![conventional_sitemap(&profile.start_url)]
+        }
+        _ => Vec::new(),
+    };
+    for seed in seeds {
+        queue.push_back((seed.to_string(), profile.start_url.clone(), 0));
+    }
+
+    while let Some((href, document, depth)) = queue.pop_front() {
+        if cancel.is_cancelled() {
+            break;
+        }
+        if inventory.files.len() >= limits.max_sitemap_files {
+            inventory.files.push(sitemap_file(
+                href,
+                None,
+                SitemapFileState::Capped,
+                REASON_SITEMAP_FILE_CAP,
+                0,
+            ));
+            continue;
+        }
+        if depth > limits.max_sitemap_depth {
+            inventory.files.push(sitemap_file(
+                href,
+                None,
+                SitemapFileState::DepthLimit,
+                REASON_SITEMAP_DEPTH,
+                0,
+            ));
+            continue;
+        }
+
+        let classified = classify_href(profile, &document, None, &href);
+        let Some(resolved) = classified.resolved.clone() else {
+            inventory.files.push(sitemap_file(
+                href,
+                None,
+                SitemapFileState::ParseError,
+                REASON_SITEMAP_PARSE,
+                0,
+            ));
+            continue;
+        };
+        if resolved.origin() != profile.start_url.origin() {
+            inventory.files.push(sitemap_file(
+                href,
+                classified.identity.clone(),
+                SitemapFileState::CrossOrigin,
+                REASON_SITEMAP_CROSS_ORIGIN,
+                0,
+            ));
+            continue;
+        }
+        let identity = FetchIdentity::from_url(&resolved);
+        let file_key = identity.as_str().to_owned();
+        if !seen.insert(file_key) {
+            inventory.files.push(sitemap_file(
+                href,
+                Some(identity),
+                SitemapFileState::Cycle,
+                REASON_SITEMAP_CYCLE,
+                0,
+            ));
+            continue;
+        }
+        if let Some(file) = robots_file
+            && let UrlAccess::Blocked(evidence) = file.decide(profile, identity.as_url())
+        {
+            inventory.files.push(sitemap_file(
+                href,
+                Some(identity),
+                SitemapFileState::Blocked,
+                evidence.note,
+                0,
+            ));
+            continue;
+        }
+
+        limits.sleep(limits.min_delay).await;
+        let fetched = transport
+            .fetch_with_body_limit(
+                identity.as_url(),
+                ResourceKind::Sitemap,
+                limits.max_sitemap_bytes,
+            )
+            .await;
+        match fetched {
+            Err(err) if err.is_auth_failure() => {
+                inventory.files.push(sitemap_file(
+                    href,
+                    Some(identity),
+                    SitemapFileState::Inaccessible,
+                    err.observation().to_owned(),
+                    0,
+                ));
+                return Err(inventory);
+            }
+            Err(err) => {
+                inventory.files.push(sitemap_file(
+                    href,
+                    Some(identity),
+                    SitemapFileState::Inaccessible,
+                    format!("{REASON_SITEMAP_INACCESSIBLE}: {}", err.observation()),
+                    0,
+                ));
+            }
+            Ok((record, body)) => {
+                if record.truncated {
+                    inventory.files.push(sitemap_file(
+                        href,
+                        Some(identity),
+                        SitemapFileState::Oversized,
+                        REASON_SITEMAP_OVERSIZED,
+                        0,
+                    ));
+                    continue;
+                }
+                if !(200..300).contains(&record.status) {
+                    inventory.files.push(sitemap_file(
+                        href,
+                        Some(identity),
+                        SitemapFileState::Inaccessible,
+                        format!(
+                            "{REASON_SITEMAP_INACCESSIBLE}: HTTP {} from {}",
+                            record.status, record.destination_url
+                        ),
+                        0,
+                    ));
+                    continue;
+                }
+                let decoded = match decode_sitemap_body(&body, limits.max_sitemap_bytes) {
+                    Ok(bytes) => bytes,
+                    Err(_) => {
+                        inventory.files.push(sitemap_file(
+                            href,
+                            Some(identity),
+                            SitemapFileState::Oversized,
+                            REASON_SITEMAP_OVERSIZED,
+                            0,
+                        ));
+                        continue;
+                    }
+                };
+                let xml = String::from_utf8_lossy(&decoded);
+                match parse_sitemap_xml(&xml) {
+                    Err(err) => {
+                        inventory.files.push(sitemap_file(
+                            href,
+                            Some(identity),
+                            SitemapFileState::ParseError,
+                            format!("{REASON_SITEMAP_PARSE}: {err}"),
+                            0,
+                        ));
+                    }
+                    Ok(ParsedSitemap::Index(locs)) => {
+                        inventory.files.push(sitemap_file(
+                            href.clone(),
+                            Some(identity.clone()),
+                            SitemapFileState::Fetched,
+                            REASON_FETCHED,
+                            locs.len(),
+                        ));
+                        let parent = identity.as_url().clone();
+                        for loc in locs {
+                            queue.push_back((loc, parent.clone(), depth + 1));
+                        }
+                    }
+                    Ok(ParsedSitemap::Urlset(locs)) => {
+                        inventory.files.push(sitemap_file(
+                            href.clone(),
+                            Some(identity.clone()),
+                            SitemapFileState::Fetched,
+                            REASON_FETCHED,
+                            locs.len(),
+                        ));
+                        let parent = identity.as_url().clone();
+                        for loc in locs {
+                            let listed = classify_href(profile, &parent, None, &loc);
+                            inventory.urls.push(SitemapUrlRecord {
+                                original: listed.original.clone(),
+                                identity: listed.identity.clone(),
+                                skip_reason: listed.skip_reason.map(str::to_owned),
+                                source_sitemap: parent.as_str().to_owned(),
+                            });
+                            let _ = coverage.seed(profile, listed.original.as_str());
+                            queue_page(
+                                records,
+                                frontier,
+                                limits,
+                                PageOffer {
+                                    classified: listed,
+                                    click_depth: None,
+                                    via_website: false,
+                                    via_sitemap: true,
+                                    enqueue_fetch: profile.discovery_mode.enqueues_sitemap_urls(),
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(inventory)
 }
 
 fn record_key(classified: &ClassifiedUrl) -> String {
@@ -555,6 +1048,7 @@ fn backoff_delay(attempt: usize, retry_after: Option<Duration>, max: Duration) -
 mod tests {
     use super::*;
     use crate::auth::WebBotAuth;
+    use crate::profile::DiscoveryMode;
     use crate::transport::SignedTransport;
     use reqwest::{Client, redirect::Policy};
     use std::collections::{HashMap, VecDeque};
@@ -586,7 +1080,7 @@ mod tests {
             status: u16,
             location: Option<String>,
             content_type: String,
-            body: String,
+            body: Vec<u8>,
             retry_after: Option<String>,
         },
     }
@@ -644,13 +1138,17 @@ mod tests {
         }
 
         fn on(&self, path: &str, status: u16, content_type: &str, body: &str) {
+            self.on_bytes(path, status, content_type, body.as_bytes());
+        }
+
+        fn on_bytes(&self, path: &str, status: u16, content_type: &str, body: &[u8]) {
             self.push(
                 path,
                 Planned::Respond {
                     status,
                     location: None,
                     content_type: content_type.into(),
-                    body: body.into(),
+                    body: body.to_vec(),
                     retry_after: None,
                 },
             );
@@ -663,7 +1161,7 @@ mod tests {
                     status,
                     location: None,
                     content_type: "text/plain".into(),
-                    body: String::new(),
+                    body: Vec::new(),
                     retry_after: Some(retry_after.into()),
                 },
             );
@@ -740,7 +1238,7 @@ mod tests {
                     status: 404,
                     location: None,
                     content_type: "text/plain".into(),
-                    body: "missing".into(),
+                    body: b"missing".to_vec(),
                     retry_after: None,
                 })
         };
@@ -777,8 +1275,9 @@ mod tests {
                     out.push_str(&format!("Retry-After: {retry_after}\r\n"));
                 }
                 out.push_str("\r\n");
-                out.push_str(&body);
-                let _ = stream.write_all(out.as_bytes());
+                let mut bytes = out.into_bytes();
+                bytes.extend_from_slice(&body);
+                let _ = stream.write_all(&bytes);
                 let _ = stream.flush();
             }
         }
@@ -887,6 +1386,25 @@ lists_complete = false
 
     fn crawler(origin: &TestOrigin, limits: CrawlLimits) -> Crawler {
         crawler_with(origin, limits, CancelHandle::new())
+    }
+
+    fn crawler_mode(origin: &TestOrigin, limits: CrawlLimits, mode: DiscoveryMode) -> Crawler {
+        let mut profile = profile_for(origin);
+        profile.discovery_mode = mode;
+        let transport = SignedTransport::new_with_client(client(), origin.url(), &auth());
+        Crawler::new_with_transport(profile, transport, limits, CancelHandle::new())
+    }
+
+    fn robots_listing_sitemap(origin: &TestOrigin, sitemap_path: &str) {
+        origin.on(
+            "/robots.txt",
+            200,
+            "text/plain",
+            &format!(
+                "User-agent: *\nAllow: /\nDisallow: /secret\nSitemap: {}\n",
+                origin.href(sitemap_path)
+            ),
+        );
     }
 
     fn assert_signed(origin: &TestOrigin) {
@@ -1208,5 +1726,327 @@ lists_complete = false
         assert_ne!(slow.state, UrlState::Fetched);
         assert!(!held.page_paths().contains(&"/later".to_owned()));
         assert_signed(&held);
+    }
+
+    #[tokio::test]
+    async fn homepage_mode_follows_internal_links_and_ignores_js_only_hrefs() {
+        let origin = TestOrigin::https();
+        origin.allow_robots();
+        origin.on(
+            "/",
+            200,
+            "text/html",
+            r#"<html><head><base href="/shop/"></head><body>
+                <a href="about">About</a>
+                <a href="/secret">blocked</a>
+                <a href="https://evil.example/out">out</a>
+                <script>document.write('<a href="/js-only">js</a>');</script>
+            </body></html>"#,
+        );
+        origin.on("/shop/about", 200, "text/html", "<html>about</html>");
+        origin.on("/secret", 200, "text/html", "<html>no</html>");
+        origin.on("/js-only", 200, "text/html", "<html>js</html>");
+        let mut lim = limits();
+        lim.concurrency = 1;
+        let mut crawl = crawler(&origin, lim);
+        let report = crawl.run().await;
+        assert!(report.completed);
+        assert_eq!(
+            report.url(&identity(&origin, "/")).unwrap().state,
+            UrlState::Fetched
+        );
+        assert_eq!(
+            report.url(&identity(&origin, "/")).unwrap().click_depth,
+            Some(0)
+        );
+        assert_eq!(
+            report.url(&identity(&origin, "/shop/about")).unwrap().state,
+            UrlState::Fetched
+        );
+        assert_eq!(
+            report
+                .url(&identity(&origin, "/shop/about"))
+                .unwrap()
+                .click_depth,
+            Some(1)
+        );
+        assert_eq!(
+            report.url(&identity(&origin, "/secret")).unwrap().state,
+            UrlState::Blocked
+        );
+        assert!(report.url(&identity(&origin, "/js-only")).is_none());
+        let external = report
+            .url(&FetchIdentity::from_url(
+                &Url::parse("https://evil.example/out").unwrap(),
+            ))
+            .unwrap();
+        assert_eq!(external.state, UrlState::Excluded);
+        assert!(!external.via_sitemap);
+        assert!(external.via_website);
+        let paths = origin.page_paths();
+        assert!(paths.contains(&"/".to_owned()), "{paths:?}");
+        assert!(paths.contains(&"/shop/about".to_owned()), "{paths:?}");
+        assert!(!paths.contains(&"/js-only".to_owned()), "{paths:?}");
+        assert!(!paths.contains(&"/secret".to_owned()), "{paths:?}");
+        assert_signed(&origin);
+    }
+
+    #[tokio::test]
+    async fn website_mode_keeps_sitemap_inventory_without_zero_click_depth() {
+        let origin = TestOrigin::https();
+        robots_listing_sitemap(&origin, "/sitemap.xml");
+        origin.on(
+            "/",
+            200,
+            "text/html",
+            r#"<html><a href="/about">About</a></html>"#,
+        );
+        origin.on("/about", 200, "text/html", "<html>about</html>");
+        origin.on(
+            "/sitemap.xml",
+            200,
+            "application/xml",
+            &format!(
+                "<urlset><url><loc>{}</loc></url><url><loc>{}</loc></url></urlset>",
+                origin.href("/about"),
+                origin.href("/orphan")
+            ),
+        );
+        origin.on("/orphan", 200, "text/html", "<html>orphan</html>");
+        let mut lim = limits();
+        lim.concurrency = 1;
+        let mut crawl = crawler(&origin, lim);
+        let report = crawl.run().await;
+        assert_eq!(
+            report
+                .url(&identity(&origin, "/about"))
+                .unwrap()
+                .click_depth,
+            Some(1)
+        );
+        assert!(
+            report
+                .url(&identity(&origin, "/about"))
+                .unwrap()
+                .via_website
+        );
+        assert!(
+            report
+                .url(&identity(&origin, "/about"))
+                .unwrap()
+                .via_sitemap
+        );
+        assert!(report.url(&identity(&origin, "/orphan")).is_none());
+        assert_eq!(report.sitemap.urls.len(), 2);
+        assert!(report.sitemap.urls.iter().any(|u| {
+            u.identity.as_ref() == Some(&identity(&origin, "/orphan")) && u.skip_reason.is_none()
+        }));
+        assert!(!origin.page_paths().contains(&"/orphan".to_owned()));
+        assert_signed(&origin);
+    }
+
+    #[tokio::test]
+    async fn sitemap_and_combined_modes_do_not_invent_click_depth() {
+        let origin = TestOrigin::https();
+        robots_listing_sitemap(&origin, "/sitemap.xml");
+        origin.on(
+            "/",
+            200,
+            "text/html",
+            r#"<html><a href="/about">About</a></html>"#,
+        );
+        origin.on("/about", 200, "text/html", "<html>about</html>");
+        origin.on("/orphan", 200, "text/html", "<html>orphan</html>");
+        origin.on(
+            "/sitemap.xml",
+            200,
+            "application/xml",
+            &format!(
+                "<urlset><url><loc>{}</loc></url><url><loc>{}</loc></url></urlset>",
+                origin.href("/"),
+                origin.href("/orphan")
+            ),
+        );
+        let mut lim = limits();
+        lim.concurrency = 1;
+        let mut sitemap_only = crawler_mode(&origin, lim.clone(), DiscoveryMode::Sitemap);
+        let sitemap_report = sitemap_only.run().await;
+        assert!(sitemap_report.url(&identity(&origin, "/")).is_some());
+        assert_eq!(
+            sitemap_report
+                .url(&identity(&origin, "/"))
+                .unwrap()
+                .click_depth,
+            None,
+            "sitemap URLs must not receive artificial zero-click depth"
+        );
+        assert_eq!(
+            sitemap_report
+                .url(&identity(&origin, "/orphan"))
+                .unwrap()
+                .click_depth,
+            None
+        );
+        assert!(sitemap_report.url(&identity(&origin, "/about")).is_none());
+        assert!(!origin.page_paths().contains(&"/about".to_owned()));
+
+        let origin2 = TestOrigin::https();
+        robots_listing_sitemap(&origin2, "/sitemap.xml");
+        origin2.on(
+            "/",
+            200,
+            "text/html",
+            r#"<html><a href="/about">About</a></html>"#,
+        );
+        origin2.on("/about", 200, "text/html", "<html>about</html>");
+        origin2.on("/orphan", 200, "text/html", "<html>orphan</html>");
+        origin2.on(
+            "/sitemap.xml",
+            200,
+            "application/xml",
+            &format!(
+                "<urlset><url><loc>{}</loc></url><url><loc>{}</loc></url></urlset>",
+                origin2.href("/"),
+                origin2.href("/orphan")
+            ),
+        );
+        let mut combined = crawler_mode(&origin2, lim, DiscoveryMode::Combined);
+        let combined_report = combined.run().await;
+        let home = combined_report.url(&identity(&origin2, "/")).unwrap();
+        assert_eq!(home.click_depth, Some(0));
+        assert!(home.via_website && home.via_sitemap);
+        let about = combined_report.url(&identity(&origin2, "/about")).unwrap();
+        assert_eq!(about.click_depth, Some(1));
+        assert!(about.via_website && !about.via_sitemap);
+        let orphan = combined_report.url(&identity(&origin2, "/orphan")).unwrap();
+        assert_eq!(orphan.click_depth, None);
+        assert!(orphan.via_sitemap && !orphan.via_website);
+        assert_signed(&origin);
+        assert_signed(&origin2);
+    }
+
+    #[tokio::test]
+    async fn sitemap_cycles_size_parse_and_inaccessible_are_recorded() {
+        let origin = TestOrigin::https();
+        robots_listing_sitemap(&origin, "/sitemap-index.xml");
+        origin.on(
+            "/sitemap-index.xml",
+            200,
+            "application/xml",
+            &format!(
+                "<sitemapindex>
+                    <sitemap><loc>{}</loc></sitemap>
+                    <sitemap><loc>{}</loc></sitemap>
+                    <sitemap><loc>{}</loc></sitemap>
+                    <sitemap><loc>{}</loc></sitemap>
+                 </sitemapindex>",
+                origin.href("/sitemap-index.xml"),
+                origin.href("/too-big.xml"),
+                origin.href("/broken.xml"),
+                origin.href("/missing.xml")
+            ),
+        );
+        origin.on(
+            "/too-big.xml",
+            200,
+            "application/xml",
+            &"<urlset></urlset>".repeat(100),
+        );
+        origin.on(
+            "/broken.xml",
+            200,
+            "application/xml",
+            "<html>not a sitemap</html>",
+        );
+        let mut lim = limits();
+        lim.concurrency = 1;
+        lim.max_sitemap_bytes = 512;
+        let mut crawl = crawler_mode(&origin, lim, DiscoveryMode::Sitemap);
+        let report = crawl.run().await;
+        assert!(
+            report
+                .sitemap
+                .files
+                .iter()
+                .any(|f| f.state == SitemapFileState::Cycle)
+        );
+        assert!(
+            report
+                .sitemap
+                .files
+                .iter()
+                .any(|f| f.state == SitemapFileState::Oversized)
+        );
+        assert!(
+            report
+                .sitemap
+                .files
+                .iter()
+                .any(|f| f.state == SitemapFileState::ParseError)
+        );
+        assert!(
+            report
+                .sitemap
+                .files
+                .iter()
+                .any(|f| f.state == SitemapFileState::Inaccessible)
+        );
+        assert_signed(&origin);
+    }
+
+    #[tokio::test]
+    async fn cross_origin_sitemaps_are_not_fetched_and_gzip_indexes_are() {
+        let origin = TestOrigin::https();
+        origin.on(
+            "/robots.txt",
+            200,
+            "text/plain",
+            &format!(
+                "User-agent: *\nAllow: /\nSitemap: https://evil.example/sitemap.xml\nSitemap: {}\n",
+                origin.href("/sitemap.xml.gz")
+            ),
+        );
+        let nested = format!(
+            "<urlset><url><loc>{}</loc></url></urlset>",
+            origin.href("/gzipped")
+        );
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut encoder, nested.as_bytes()).unwrap();
+        let gz = encoder.finish().unwrap();
+        origin.on_bytes("/sitemap.xml.gz", 200, "application/gzip", &gz);
+        origin.on("/gzipped", 200, "text/html", "<html>gz</html>");
+        let mut lim = limits();
+        lim.concurrency = 1;
+        let mut crawl = crawler_mode(&origin, lim, DiscoveryMode::Sitemap);
+        let report = crawl.run().await;
+        assert!(report.sitemap.files.iter().any(|f| {
+            f.state == SitemapFileState::CrossOrigin && f.reason == REASON_SITEMAP_CROSS_ORIGIN
+        }));
+        assert!(report.url(&identity(&origin, "/gzipped")).is_some());
+        assert_eq!(
+            report
+                .url(&identity(&origin, "/gzipped"))
+                .unwrap()
+                .click_depth,
+            None
+        );
+        assert!(!origin.recorded().iter().any(|r| {
+            r.headers
+                .get("host")
+                .is_some_and(|h| h.contains("evil.example"))
+        }));
+        assert_eq!(
+            origin
+                .recorded()
+                .iter()
+                .filter(|r| r.path == "/sitemap.xml.gz")
+                .count(),
+            1
+        );
+        assert_signed(&origin);
+        assert!(
+            !format!("{report:?}").contains("TESTSIGNATUREVALUE"),
+            "credentials must not appear in reports"
+        );
     }
 }
