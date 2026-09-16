@@ -49,26 +49,30 @@ Implemented: versioned TOML profiles (own-bot and comparison), prefix vs subfold
 exclusions, skip-vs-strip query policy, Web Bot Auth transport with origin-locked
 headers, same-origin HTTPS redirects, one connection retry, Signature-Input expiry
 metadata, 401/403/429 diagnostics that separate observation from suspected cause,
-HTTP/TLS fixtures for header destinations, bounded signed sample of page/robots/
-sitemap, responsive terminal status, versioned rule catalogue v1 (97 transcribed
-checks plus limited AMP remainder, fixture contract, six result states). Checkers
-are not shipped; live evaluation is `unsupported` until owner issues land. Current
-14 September 2026 findings are stored separately from the historical "new issues"
-column. No-count rows are not failures.
+HTTP/TLS fixtures for header destinations, robots access policy as a separate layer
+(user-agent groups, wildcards, encodings, failed fetches, sitemap declarations),
+bounded signed sample of page/robots/sitemap, responsive terminal status, versioned
+rule catalogue v1 (97 transcribed checks plus limited AMP remainder, fixture contract,
+six result states). Checkers are not shipped; live evaluation is `unsupported` until
+owner issues land. Current 14 September 2026 findings are stored separately from the
+historical "new issues" column. No-count rows are not failures.
 
-Not implemented: crawl queue, robots evaluation, sitemap ingestion, rule checkers,
-SQLite history, scheduling, credential editing/storage, mobile rendering or JS.
+Not implemented: crawl queue, sitemap ingestion, rule checkers, SQLite history,
+scheduling, credential editing/storage, mobile rendering or JS.
 The page cap (20,000) and historical 3,725-page observation are not catalogue size.
 Weekly Monday is recorded without a time, timezone, or scheduler.
 A successful sample is not evidence that Shopify verified the signature, and the
-simple challenge heuristic cannot detect every block page. Robots bypass remains off
-and is independent of authentication.
+simple challenge heuristic cannot detect every block page. Default TiendaCables
+profiles keep robots and meta bypass off even with signed requests. Robots denial is
+blocked evidence, not a broken page. Meta noindex is a distinct block kind and is not
+evaluated in this slice. Crawl-delay is recorded and is not access policy. Missing or
+unreachable robots.txt allows crawling and is not treated as a denial.
 
 ## Next milestones
 
-1. Robots policy as a separate layer on this transport; bounded queue, backoff,
-   cancellation, discovery and per-URL reasons. Preserve skipped links for coverage
-   without fetching excluded URLs.
+1. Bounded queue, backoff, cancellation, discovery and per-URL reasons on this
+   transport and robots layer. Preserve skipped links for coverage without fetching
+   excluded URLs.
 2. SQLite runs and homepage-based link depth; sitemaps as separate discovery evidence.
 3. Metadata/link/canonical checks with evidence; then the broader Semrush catalogue.
 4. History, scheduled headless runs and exports. A web UI can follow independently.
@@ -98,8 +102,10 @@ cargo run -p crawlytic
 
 Controlled HTTP/TLS fixtures in `cargo test` assert which destination receives each
 Web Bot Auth header, including same-origin redirects, refused cross-origin and HTTP
-downgrades, retries, 401/403/429 diagnostics and secret redaction. They do not contact
-the storefront.
+downgrades, retries, 401/403/429 diagnostics and secret redaction. Robots fixtures
+cover user-agent selection, conflicting rules, encodings, failed fetches, signed
+requests with bypass off, and an explicit owner-audit override retained in run
+metadata. They do not contact the storefront.
 
 A user-reported or local `p` sample is operator evidence only. It is not recorded in
 this repository, is not covered by the default `cargo test` run, and is not proof that

@@ -1,5 +1,7 @@
 use anyhow::Result;
-use crawlytic_core::{CRYPTO_VERIFICATION_LIMITATION, Profile, WebBotAuth, load_dotenv, preflight};
+use crawlytic_core::{
+    CRYPTO_VERIFICATION_LIMITATION, Profile, UrlAccess, WebBotAuth, load_dotenv, preflight,
+};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{
     layout::{Constraint, Layout},
@@ -67,8 +69,21 @@ fn main() -> Result<()> {
                                                 })
                                                 .collect::<Vec<_>>()
                                                 .join("; ");
+                                            let robots = match &r.start_url_access {
+                                                UrlAccess::Blocked(evidence) => {
+                                                    format!(
+                                                        "Start URL blocked by robots.txt ({}); not a broken page; not meta noindex.",
+                                                        evidence.rule.as_deref().unwrap_or("rule")
+                                                    )
+                                                }
+                                                UrlAccess::Allowed { .. } => format!(
+                                                    "Start URL allowed by robots access policy. Owner robots bypass: {} (meta bypass {}).",
+                                                    if r.robots.bypass_robots { "on" } else { "off" },
+                                                    if r.robots.bypass_meta { "on" } else { "off" }
+                                                ),
+                                            };
                                             format!(
-                                                "HTTP {} | {} | {} bytes sampled.\n{samples}\n{}",
+                                                "HTTP {} | {} | {} bytes sampled.\n{samples}\n{robots}\n{}",
                                                 r.status,
                                                 r.content_type,
                                                 r.bytes_sampled,
