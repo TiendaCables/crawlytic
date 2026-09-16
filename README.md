@@ -42,9 +42,13 @@ prefixes (`/shoes` matches `/shoes-men`); a trailing slash is that folder only.
 
 Implemented: versioned TOML profiles (own-bot and comparison), prefix vs subfolder
 exclusions, skip-vs-strip query policy, credential validation, sensitive headers,
-bounded HTML preflight, responsive terminal status.
+bounded HTML preflight, responsive terminal status, versioned rule catalogue v1
+(97 transcribed checks plus limited AMP remainder, fixture contract, six result
+states). Checkers are not shipped; live evaluation is `unsupported` until owner
+issues land. Current 14 September 2026 findings are stored separately from the
+historical "new issues" column. No-count rows are not failures.
 
-Not implemented: crawl queue, robots evaluation, sitemap ingestion, audit rules,
+Not implemented: crawl queue, robots evaluation, sitemap ingestion, rule checkers,
 SQLite history, scheduling, credential editing/storage, mobile rendering or JS.
 The page cap (20,000) and historical 3,725-page observation are not catalogue size.
 Weekly Monday is recorded without a time, timezone, or scheduler.
