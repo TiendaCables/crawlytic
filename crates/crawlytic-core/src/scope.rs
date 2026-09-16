@@ -145,6 +145,18 @@ impl Coverage {
     pub fn links(&self) -> &[CoverageLink] {
         &self.links
     }
+
+    pub(crate) fn restore(urls: Vec<CoverageUrl>, links: Vec<CoverageLink>) -> Self {
+        let mut map = BTreeMap::new();
+        for url in urls {
+            let key = match &url.identity {
+                Some(identity) => identity_key(identity),
+                None => unresolved_key(&url.original),
+            };
+            map.insert(key, url);
+        }
+        Self { urls: map, links }
+    }
 }
 
 pub fn classify_href(

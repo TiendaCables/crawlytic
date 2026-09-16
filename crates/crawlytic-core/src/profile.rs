@@ -1,18 +1,18 @@
 use anyhow::{Context, Result, ensure};
 use reqwest::header::HeaderValue;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use url::Url;
 
 pub const SCHEMA_VERSION: u32 = 1;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProfileRole {
     OwnBot,
     Comparison,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DiscoveryMode {
     HomepageInternalLinks,
@@ -30,26 +30,26 @@ impl DiscoveryMode {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CrawlDelay {
     Minimum,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IgnoredParameterMode {
     Skip,
     Strip,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ScheduleCadence {
     Weekly,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Weekday {
     Monday,
@@ -62,7 +62,7 @@ pub enum Weekday {
 }
 
 /// Versioned crawl profile. Secret values are referenced by environment name only.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Profile {
     pub schema_version: u32,
@@ -85,9 +85,9 @@ pub struct Profile {
     pub skip_parameters: Vec<String>,
     pub schedule_cadence: ScheduleCadence,
     pub schedule_weekday: Weekday,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schedule_time: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schedule_timezone: Option<String>,
     pub completion_email: bool,
     pub auth_signature_env: String,
@@ -97,7 +97,7 @@ pub struct Profile {
     pub ignored_parameters_source_count: usize,
     pub exclude_paths_complete: bool,
     pub lists_complete: bool,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub limits_are_catalogue_size: bool,
 }
 
