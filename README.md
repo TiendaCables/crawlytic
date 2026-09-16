@@ -49,7 +49,7 @@ locations are recorded and never receive credentials.
 
 ## Boundaries
 
-- `crawlytic-core`: profile, URL identity/scope, robots policy, Web Bot Auth transport, bounded crawl, homepage/sitemap discovery, SQLite run persistence, and typed start/cancel/resume commands with coalesced progress events; no terminal dependency.
+- `crawlytic-core`: profile, URL identity/scope, robots policy, Web Bot Auth transport, bounded crawl, homepage/sitemap discovery, SQLite run persistence, versioned page/link/resource extraction, and typed start/cancel/resume commands with coalesced progress events; no terminal dependency.
 - `crawlytic`: Ratatui rendering, key input and background-task coordination.
 - Future interfaces can use the core without depending on Ratatui. The displayed user agent is the HTTP User-Agent string, not a browser viewport.
 
@@ -69,7 +69,13 @@ backoff with a retry budget, cancellation that classifies outstanding URLs),
 homepage-link discovery and independent sitemap inventory (indexes, gzip, size/depth/cycle
 bounds, cross-origin locations refused without forwarding credentials),
 SQLite persistence for runs, sanitized profile snapshots, URL states, fetch evidence,
-links, resource references, sitemap membership and idempotent findings. Typed crawl
+links, resource references, sitemap membership and idempotent findings. Versioned page,
+link and resource observations (schema v1) extracted from fetched bodies so later rules
+share evidence without refetching: titles, descriptions, headings, robots meta/headers,
+canonicals, hreflang/lang, viewport, doctype, encoding, text, anchors/rel and
+images/scripts/styles, plus status, timings, content type, raw versus decoded sizes and
+completeness. Truncated, challenge, error and non-HTML bodies cannot be marked complete.
+The extraction schema has no severity or UI fields. Typed crawl
 commands (start, cancel, resume) and coalesced progress events (run status, counters,
 fetch completion, diagnostics) so a headless client can drive a run; the discrete event
 queue is bounded and a slow consumer drops events instead of growing memory. Counters
@@ -102,7 +108,7 @@ lists it as an ignored parameter. Path slash variants and query order stay disti
 ## Next milestones
 
 1. Shortest-path depth from the homepage graph; sitemaps stay separate evidence.
-2. Metadata/link/canonical checks with evidence; then the broader Semrush catalogue.
+2. Rule checkers over stored observations (titles, links, canonicals); then the broader Semrush catalogue.
 3. Cross-run history, scheduled headless runs and exports. A web UI can follow independently.
 
 Recorded TiendaCables settings: www.tiendacables.com; 20,000 page cap; 3,725-page
@@ -141,7 +147,9 @@ client, cancel/resume commands, counter reconciliation with persisted URL states
 bounded event queue that drops when the consumer lags. Persistence fixtures cover kill/restart resume
 without duplicate findings, in-flight retry, secret-free stored settings, writer batching,
 optional HTML quotas, and visible disk-full/migration failures that leave partial runs
-incomplete. They do not contact the storefront.
+incomplete. Extraction fixtures cover missing/multiple tags, malformed HTML, non-HTML
+responses, encoding fallback, link/resource host ownership, and truncated/challenge/error
+bodies that stay incomplete. They do not contact the storefront.
 
 A user-reported or local `p` sample is operator evidence only. It is not recorded in
 this repository, is not covered by the default `cargo test` run, and is not proof that

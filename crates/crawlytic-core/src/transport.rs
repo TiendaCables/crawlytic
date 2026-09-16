@@ -33,6 +33,9 @@ pub struct FetchRecord {
     pub resource_kind: ResourceKind,
     pub credentials_attached: bool,
     pub truncated: bool,
+    pub duration_ms: u64,
+    pub robots_tag_headers: Vec<String>,
+    pub link_headers: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -196,6 +199,7 @@ impl SignedTransport {
                 ),
             ));
         }
+        let started = std::time::Instant::now();
         let mut current = url.clone();
         self.authorize(&current)?;
         let mut redirects = 0;
@@ -225,6 +229,8 @@ impl SignedTransport {
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("")
                 .to_owned();
+            let robots_tag_headers = header_values(response.headers(), "x-robots-tag");
+            let link_headers = header_values(response.headers(), "link");
             let (sample, truncated) = read_sample(response, max_bytes.max(1)).await?;
             if kind == ResourceKind::Page {
                 ensure_html_page(&current, status, &content_type, &sample)?;
@@ -247,6 +253,9 @@ impl SignedTransport {
                     resource_kind: kind,
                     credentials_attached: true,
                     truncated,
+                    duration_ms: started.elapsed().as_millis() as u64,
+                    robots_tag_headers,
+                    link_headers,
                 },
                 sample,
             ));
@@ -483,6 +492,16 @@ async fn read_sample(
         }
     }
     Ok((sample, truncated))
+}
+
+fn header_values(headers: &reqwest::header::HeaderMap, name: &str) -> Vec<String> {
+    headers
+        .get_all(name)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .collect()
 }
 
 fn ensure_html_page(
