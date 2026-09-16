@@ -24,9 +24,16 @@ in this slice; configure the final host. Auth errors never trigger unsigned fall
 sf-string, so a URI without quotes is wrapped as `"https://shopify.com"`.
 
 Copy `profile.example.toml` to `profile.local.toml` and launch with
-`cargo run -p audit-tui -- profile.local.toml` to customize the profile.
-The example exclusions and parameters are only the visible portion of screenshots.
-The prototype identifies itself; it does not impersonate Semrush's mobile bot.
+`cargo run -p audit-tui -- profile.local.toml` to customize the own-bot profile.
+`profile.comparison.toml` records the captured Semrush SiteAuditBot user-agent and
+the same incomplete scope lists for comparison only; do not use it to impersonate
+Semrush. Wrap `.env` values in single quotes so embedded double quotes survive.
+
+Captured lists are partial: 12 of 27 ignored parameter names and a visible subset of
+excluded paths. Do not guess the rest or mark `lists_complete`. URLs that carry a
+listed parameter are skipped entirely; `ignored_parameter_mode = "strip"` is a
+separate explicit behaviour. Path entries without a trailing slash are string
+prefixes (`/shoes` matches `/shoes-men`); a trailing slash is that folder only.
 
 ## Boundaries
 
@@ -34,13 +41,15 @@ The prototype identifies itself; it does not impersonate Semrush's mobile bot.
 - `audit-tui`: Ratatui rendering, key input and background-task coordination.
 - Future interfaces can use the core without depending on Ratatui.
 
-Implemented: TOML loading, explicit exclusion semantics, credential validation,
-sensitive headers, bounded HTML preflight, responsive terminal status.
+Implemented: versioned TOML profiles (own-bot and comparison), prefix vs subfolder
+exclusions, skip-vs-strip query policy, credential validation, sensitive headers,
+bounded HTML preflight, responsive terminal status.
 
 Not implemented: crawl queue, robots evaluation, sitemap ingestion, audit rules,
 SQLite history, scheduling, credential editing/storage, mobile rendering or JS.
-The page budget and exclusion configuration are for the forthcoming crawler;
-the explicit connection probe only requests the configured start URL.
+The page cap (20,000) and historical 3,725-page observation are not catalogue size.
+Weekly Monday is recorded without a time, timezone, or scheduler.
+The explicit connection probe only requests the configured start URL.
 A successful probe is not evidence that Shopify verified the signature, and the
 simple challenge heuristic cannot detect every block page.
 
@@ -54,9 +63,10 @@ simple challenge heuristic cannot detect every block page.
 4. Metadata/link/canonical checks with evidence; then the broader Semrush catalogue.
 5. History, scheduled headless runs and exports. A web UI can follow independently.
 
-Current Semrush baseline: www.tiendacables.com; 3,725 crawled pages in screenshots;
-20,000 configured ceiling; homepage-link discovery; JS off; weekly Mondays;
-robots bypass off; Web Bot Auth required; 27 ignored parameters (partial list provided).
+Recorded TiendaCables settings: www.tiendacables.com; 20,000 page cap; 3,725-page
+historical observation (not an invariant); homepage-link discovery; JS off; crawl
+delay minimum (no numeric rate); weekly Monday intent; robots/meta bypass off;
+Web Bot Auth required; 12 of 27 ignored parameters captured.
 
 ## Verification
 

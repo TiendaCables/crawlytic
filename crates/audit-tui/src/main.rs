@@ -26,10 +26,10 @@ fn main() -> Result<()> {
             }
             terminal.draw(|f| {
                 let [header, config, auth, footer] = Layout::vertical([
-                    Constraint::Length(3), Constraint::Length(10), Constraint::Min(5), Constraint::Length(3)
+                    Constraint::Length(3), Constraint::Min(8), Constraint::Min(5), Constraint::Length(3)
                 ]).areas(f.area());
                 f.render_widget(Paragraph::new("CRAWL / terminal audit prototype").style(Style::default().fg(Color::Cyan)).block(Block::bordered()), header);
-                f.render_widget(Paragraph::new(format!("Store: {}\nPage budget (future crawl): {}\nExcluded path prefixes: {} | skipped parameters: {}\nDiscovery target: homepage links | JavaScript: off\nProfile lists are partial; edit the TOML to complete them.\nCurrent capability: connection preflight only.", profile.start_url, profile.max_pages, profile.exclude_paths.len(), profile.skip_parameters.len())).wrap(Wrap { trim: false }).block(Block::bordered().title(" Crawl profile ")), config);
+                f.render_widget(Paragraph::new(format!("{}\nCurrent capability: connection preflight only.", profile.summary())).wrap(Wrap { trim: false }).block(Block::bordered().title(" Crawl profile ")), config);
                 f.render_widget(Paragraph::new(format!("Web Bot Auth: required\nCredentials: CRAWL_SIGNATURE, CRAWL_SIGNATURE_INPUT, CRAWL_SIGNATURE_AGENT (.env or environment)\n\n{message}")).wrap(Wrap { trim: false }).block(Block::bordered().title(" Shopify access ")), auth);
                 f.render_widget(Paragraph::new("p  Test connection     q / Esc / Ctrl-C  Quit").block(Block::bordered()), footer);
             })?;
