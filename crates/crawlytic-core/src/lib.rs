@@ -5,6 +5,7 @@ mod discovery;
 mod profile;
 mod robots;
 mod scope;
+mod store;
 mod transport;
 
 pub use auth::{
@@ -31,6 +32,10 @@ pub use robots::{
 pub use scope::{
     ClassifiedUrl, Coverage, CoverageLink, CoverageUrl, FetchIdentity, SKIP_MALFORMED,
     SKIP_UNSUPPORTED_SCHEME, classify_absolute, classify_href,
+};
+pub use store::{
+    FindingRecord, LoadedRun, ResourceRef, RetentionPolicy, RunStatus, STORE_SCHEMA_VERSION, Store,
+    StoreError, StoreErrorKind,
 };
 pub use transport::{AccessError, FetchRecord, Probe, ResourceKind, SignedTransport, preflight};
 

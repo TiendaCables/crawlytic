@@ -15,6 +15,7 @@ use crate::discovery::{
 use crate::profile::Profile;
 use crate::robots::{AllowReason, RobotsCache, RobotsFile, RobotsRunMetadata, UrlAccess};
 use crate::scope::{ClassifiedUrl, Coverage, CoverageLink, FetchIdentity, classify_href};
+use crate::store::{LoadedRun, RunStatus, Store, StoreError};
 use crate::transport::{ResourceKind, SignedTransport};
 use anyhow::Result;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -24,6 +25,7 @@ use std::time::Duration;
 use tokio::sync::Notify;
 use url::Url;
 
+pub const REASON_IN_FLIGHT: &str = "In flight";
 pub const REASON_QUEUED: &str = "Queued";
 pub const REASON_QUEUE_CAP: &str = "Queue cap";
 pub const REASON_URL_CAP: &str = "URL cap";
@@ -153,6 +155,7 @@ pub enum UrlState {
     Blocked,
     Failed,
     Pending,
+    InFlight,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -206,6 +209,7 @@ pub struct SitemapInventory {
 pub struct CrawlReport {
     pub completed: bool,
     pub cancelled: bool,
+    pub persist_error: Option<String>,
     pub urls: Vec<UrlRecord>,
     pub robots: Option<RobotsRunMetadata>,
     pub sitemap: SitemapInventory,
@@ -224,6 +228,12 @@ impl CrawlReport {
     }
 }
 
+#[derive(Clone)]
+struct PersistSession {
+    store: Store,
+    run_id: i64,
+}
+
 pub struct Crawler {
     profile: Profile,
     transport: SignedTransport,
@@ -232,6 +242,9 @@ pub struct Crawler {
     coverage: Coverage,
     records: BTreeMap<String, UrlRecord>,
     frontier: VecDeque<FetchIdentity>,
+    persist: Option<PersistSession>,
+    sitemap: SitemapInventory,
+    sitemap_done: bool,
 }
 
 impl Crawler {
@@ -259,7 +272,46 @@ impl Crawler {
             coverage: Coverage::new(),
             records: BTreeMap::new(),
             frontier: VecDeque::new(),
+            persist: None,
+            sitemap: SitemapInventory::default(),
+            sitemap_done: false,
         }
+    }
+
+    pub fn persist_on(&mut self, store: Store, run_id: i64) {
+        self.persist = Some(PersistSession { store, run_id });
+    }
+
+    pub fn resume(
+        store: Store,
+        run_id: i64,
+        auth: &WebBotAuth,
+        limits: CrawlLimits,
+        cancel: CancelHandle,
+    ) -> Result<Self> {
+        let loaded = store.load_run(run_id)?;
+        anyhow::ensure!(!loaded.completed, "Cannot resume a completed run");
+        let mut crawler = Self::new(loaded.profile.clone(), auth, limits, cancel)?;
+        restore_into(&mut crawler, loaded);
+        crawler.persist_on(store, run_id);
+        Ok(crawler)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn resume_with_transport(
+        store: Store,
+        run_id: i64,
+        transport: SignedTransport,
+        limits: CrawlLimits,
+        cancel: CancelHandle,
+    ) -> Result<Self> {
+        let loaded = store.load_run(run_id)?;
+        anyhow::ensure!(!loaded.completed, "Cannot resume a completed run");
+        let mut crawler =
+            Self::new_with_transport(loaded.profile.clone(), transport, limits, cancel);
+        restore_into(&mut crawler, loaded);
+        crawler.persist_on(store, run_id);
+        Ok(crawler)
     }
 
     pub fn limits(&self) -> &CrawlLimits {
@@ -325,43 +377,106 @@ impl Crawler {
             );
         }
 
-        let sitemap = match inventory_sitemaps(
-            &self.transport,
-            &self.profile,
-            &self.limits,
-            &self.cancel,
-            robots_file.as_ref(),
-            &mut self.records,
-            &mut self.frontier,
-            &mut self.coverage,
-        )
-        .await
-        {
-            Ok(inventory) => inventory,
-            Err(inventory) => {
-                reclassify_queued(&mut self.records, UrlState::Failed, REASON_AUTH);
-                stamp_sitemap_provenance(&mut self.records, &inventory);
-                return report(
-                    &self.records,
-                    false,
-                    self.cancel.is_cancelled(),
-                    robots_meta,
-                    inventory,
-                    self.coverage.links(),
-                );
+        let sitemap = if self.sitemap_done {
+            self.sitemap.clone()
+        } else {
+            match inventory_sitemaps(
+                &self.transport,
+                &self.profile,
+                &self.limits,
+                &self.cancel,
+                robots_file.as_ref(),
+                &mut self.records,
+                &mut self.frontier,
+                &mut self.coverage,
+            )
+            .await
+            {
+                Ok(inventory) => {
+                    self.sitemap_done = true;
+                    self.sitemap = inventory.clone();
+                    inventory
+                }
+                Err(inventory) => {
+                    reclassify_queued(&mut self.records, UrlState::Failed, REASON_AUTH);
+                    stamp_sitemap_provenance(&mut self.records, &inventory);
+                    let persist_error = persist_checkpoint(
+                        self.persist.as_ref(),
+                        &self.records,
+                        &self.frontier,
+                        self.coverage.links(),
+                        &inventory,
+                        true,
+                    )
+                    .err()
+                    .map(|err| err.to_string());
+                    finish_persisted(
+                        self.persist.as_ref(),
+                        false,
+                        self.cancel.is_cancelled(),
+                        persist_error.as_deref(),
+                    );
+                    return with_persist_error(
+                        report(
+                            &self.records,
+                            false,
+                            self.cancel.is_cancelled(),
+                            robots_meta,
+                            inventory,
+                            self.coverage.links(),
+                        ),
+                        persist_error,
+                    );
+                }
             }
         };
 
         if self.cancel.is_cancelled() {
             reclassify_queued(&mut self.records, UrlState::Pending, REASON_CANCELLED);
             stamp_sitemap_provenance(&mut self.records, &sitemap);
-            return report(
+            let persist_error = persist_checkpoint(
+                self.persist.as_ref(),
                 &self.records,
-                false,
-                true,
-                robots_meta,
-                sitemap,
+                &self.frontier,
                 self.coverage.links(),
+                &sitemap,
+                true,
+            )
+            .err()
+            .map(|err| err.to_string());
+            finish_persisted(self.persist.as_ref(), false, true, persist_error.as_deref());
+            return with_persist_error(
+                report(
+                    &self.records,
+                    false,
+                    true,
+                    robots_meta,
+                    sitemap,
+                    self.coverage.links(),
+                ),
+                persist_error,
+            );
+        }
+
+        if let Err(err) = persist_checkpoint(
+            self.persist.as_ref(),
+            &self.records,
+            &self.frontier,
+            self.coverage.links(),
+            &sitemap,
+            true,
+        ) {
+            finish_persisted(self.persist.as_ref(), false, false, Some(&err.to_string()));
+            return with_persist_error(
+                report(
+                    &self.records,
+                    false,
+                    false,
+                    robots_meta,
+                    sitemap,
+                    self.coverage.links(),
+                ),
+                Some(err.to_string()),
             );
         }
 
@@ -370,6 +485,8 @@ impl Crawler {
             frontier: std::mem::take(&mut self.frontier),
             coverage: std::mem::take(&mut self.coverage),
             auth_failed: false,
+            persist: self.persist.clone(),
+            persist_error: None,
         }));
         let gate = Arc::new(tokio::sync::Mutex::new(None::<tokio::time::Instant>));
         let mut tasks = tokio::task::JoinSet::new();
@@ -387,7 +504,7 @@ impl Crawler {
             }
             {
                 let state = shared.lock().await;
-                if state.auth_failed {
+                if state.auth_failed || state.persist_error.is_some() {
                     stop_scheduling = true;
                 }
             }
@@ -440,8 +557,16 @@ impl Crawler {
         let cancelled = cancel.is_cancelled();
         let mut state = shared.lock().await;
         let auth_failed = state.auth_failed;
+        let persist_error = state.persist_error.clone();
         for record in state.records.values_mut() {
-            if record.state == UrlState::Pending && record.reason == REASON_QUEUED {
+            if record.state == UrlState::InFlight {
+                record.state = UrlState::Pending;
+                record.reason = if cancelled {
+                    REASON_CANCELLED.to_owned()
+                } else {
+                    REASON_QUEUED.to_owned()
+                };
+            } else if record.state == UrlState::Pending && record.reason == REASON_QUEUED {
                 if cancelled {
                     record.reason = REASON_CANCELLED.to_owned();
                 } else if auth_failed {
@@ -454,13 +579,35 @@ impl Crawler {
         self.frontier = std::mem::take(&mut state.frontier);
         self.coverage = std::mem::take(&mut state.coverage);
         stamp_sitemap_provenance(&mut self.records, &sitemap);
-        report(
-            &self.records,
-            !cancelled,
+        let persist_error = persist_error.or_else(|| {
+            persist_checkpoint(
+                self.persist.as_ref(),
+                &self.records,
+                &self.frontier,
+                self.coverage.links(),
+                &sitemap,
+                true,
+            )
+            .err()
+            .map(|err| err.to_string())
+        });
+        let completed = !cancelled && persist_error.is_none();
+        finish_persisted(
+            self.persist.as_ref(),
+            completed,
             cancelled,
-            robots_meta,
-            sitemap,
-            self.coverage.links(),
+            persist_error.as_deref(),
+        );
+        with_persist_error(
+            report(
+                &self.records,
+                completed,
+                cancelled,
+                robots_meta,
+                sitemap,
+                self.coverage.links(),
+            ),
+            persist_error,
         )
     }
 }
@@ -470,6 +617,8 @@ struct RunState {
     frontier: VecDeque<FetchIdentity>,
     coverage: Coverage,
     auth_failed: bool,
+    persist: Option<PersistSession>,
+    persist_error: Option<String>,
 }
 
 struct PageOffer {
@@ -501,6 +650,8 @@ async fn process_one(
         set_record(&shared, &identity, UrlState::Pending, REASON_CANCELLED).await;
         return WorkerOut::Cancelled;
     }
+    set_record(&shared, &identity, UrlState::InFlight, REASON_IN_FLIGHT).await;
+    persist_frontier(&shared).await;
 
     let url = identity.as_url().clone();
     let access = match robots_file.as_deref() {
@@ -551,6 +702,7 @@ async fn process_one(
                     REASON_FETCHED
                 };
                 set_record(&shared, &identity, UrlState::Fetched, reason).await;
+                persist_fetch(&shared, &identity, &record, &body).await;
                 if profile.discovery_mode.follows_website_links() {
                     discover_html_links(&profile, &limits, &identity, &body, &shared).await;
                 }
@@ -625,9 +777,26 @@ async fn set_record(
 ) {
     let key = identity_key(identity);
     let mut shared = shared.lock().await;
-    if let Some(record) = shared.records.get_mut(&key) {
+    let snapshot = if let Some(record) = shared.records.get_mut(&key) {
         record.state = state;
         record.reason = reason.into();
+        Some(record.clone())
+    } else {
+        None
+    };
+    if let (Some(session), Some(record)) = (shared.persist.clone(), snapshot) {
+        match session.store.upsert_url(session.run_id, &record) {
+            Ok(()) => {
+                if matches!(
+                    record.state,
+                    UrlState::InFlight | UrlState::Fetched | UrlState::Failed | UrlState::Blocked
+                ) && let Err(err) = session.store.flush()
+                {
+                    note_persist_error(&mut shared, err);
+                }
+            }
+            Err(err) => note_persist_error(&mut shared, err),
+        }
     }
 }
 
@@ -651,10 +820,167 @@ fn report(
     CrawlReport {
         completed,
         cancelled,
+        persist_error: None,
         urls: records.values().cloned().collect(),
         robots,
         sitemap,
         links: links.to_vec(),
+    }
+}
+
+fn with_persist_error(mut report: CrawlReport, persist_error: Option<String>) -> CrawlReport {
+    if persist_error.is_some() {
+        report.completed = false;
+    }
+    report.persist_error = persist_error;
+    report
+}
+
+fn restore_into(crawler: &mut Crawler, loaded: LoadedRun) {
+    let mut records = BTreeMap::new();
+    let mut recovered = Vec::new();
+    for mut record in loaded.urls {
+        if record.state == UrlState::InFlight {
+            record.state = UrlState::Pending;
+            record.reason = REASON_QUEUED.to_owned();
+            if let Some(identity) = record.identity.clone() {
+                recovered.push(identity);
+            }
+        }
+        records.insert(record_key_for(&record), record);
+    }
+    let mut frontier = VecDeque::new();
+    let mut seen = BTreeSet::new();
+    for identity in loaded.frontier.into_iter().chain(recovered) {
+        let key = identity_key(&identity);
+        if !seen.insert(key.clone()) {
+            continue;
+        }
+        if let Some(record) = records.get(&key)
+            && record.state == UrlState::Pending
+            && record.reason == REASON_QUEUED
+        {
+            frontier.push_back(identity);
+        }
+    }
+    for record in records.values() {
+        if record.state == UrlState::Pending
+            && record.reason == REASON_QUEUED
+            && let Some(identity) = &record.identity
+        {
+            let key = identity_key(identity);
+            if seen.insert(key) {
+                frontier.push_back(identity.clone());
+            }
+        }
+    }
+    crawler.records = records;
+    crawler.frontier = frontier;
+    crawler.coverage = Coverage::restore(loaded.coverage_urls, loaded.links);
+    crawler.sitemap = loaded.sitemap;
+    crawler.sitemap_done = loaded.sitemap_done;
+}
+
+fn persist_checkpoint(
+    persist: Option<&PersistSession>,
+    records: &BTreeMap<String, UrlRecord>,
+    frontier: &VecDeque<FetchIdentity>,
+    links: &[CoverageLink],
+    sitemap: &SitemapInventory,
+    flush: bool,
+) -> Result<(), StoreError> {
+    let Some(session) = persist else {
+        return Ok(());
+    };
+    for record in records.values() {
+        session.store.upsert_url(session.run_id, record)?;
+    }
+    session
+        .store
+        .replace_frontier(session.run_id, frontier.iter().cloned())?;
+    session.store.replace_links(session.run_id, links)?;
+    session.store.save_sitemap(session.run_id, sitemap)?;
+    session.store.mark_sitemap_done(session.run_id)?;
+    if flush {
+        session.store.flush()?;
+    }
+    Ok(())
+}
+
+fn finish_persisted(
+    persist: Option<&PersistSession>,
+    completed: bool,
+    cancelled: bool,
+    error: Option<&str>,
+) {
+    let Some(session) = persist else {
+        return;
+    };
+    let status = if completed {
+        RunStatus::Completed
+    } else {
+        RunStatus::Incomplete
+    };
+    let _ = session
+        .store
+        .finish_run(session.run_id, status, completed, cancelled, error);
+}
+
+fn note_persist_error(state: &mut RunState, err: StoreError) {
+    if err.is_disk_full() {
+        let _ = state.persist.as_ref().map(|session| {
+            session
+                .store
+                .mark_incomplete(session.run_id, &err.to_string())
+        });
+    }
+    state.persist_error = Some(err.to_string());
+}
+
+async fn persist_frontier(shared: &tokio::sync::Mutex<RunState>) {
+    let mut state = shared.lock().await;
+    let Some(session) = state.persist.clone() else {
+        return;
+    };
+    if let Err(err) = session
+        .store
+        .replace_frontier(session.run_id, state.frontier.iter().cloned())
+    {
+        note_persist_error(&mut state, err);
+    }
+}
+
+async fn persist_fetch(
+    shared: &tokio::sync::Mutex<RunState>,
+    identity: &FetchIdentity,
+    record: &crate::transport::FetchRecord,
+    body: &[u8],
+) {
+    let mut state = shared.lock().await;
+    let Some(session) = state.persist.clone() else {
+        return;
+    };
+    if let Err(err) = session
+        .store
+        .upsert_fetch(session.run_id, identity, record, Some(body))
+    {
+        note_persist_error(&mut state, err);
+        return;
+    }
+    if let Err(err) = session.store.add_resource_ref(
+        session.run_id,
+        identity.as_str(),
+        record.resource_kind,
+        None,
+    ) {
+        note_persist_error(&mut state, err);
+    }
+}
+
+fn record_key_for(record: &UrlRecord) -> String {
+    match &record.identity {
+        Some(identity) => identity_key(identity),
+        None => format!("o:{}", record.original),
     }
 }
 
@@ -736,36 +1062,51 @@ async fn discover_html_links(
     let links = extract_navigational_links(&html);
     let document_url = from.as_url().clone();
     let mut state = shared.lock().await;
-    let RunState {
-        records,
-        frontier,
-        coverage,
-        ..
-    } = &mut *state;
-    let from_depth = records
+    let from_depth = state
+        .records
         .get(&identity_key(from))
         .and_then(|record| record.click_depth);
     let child_depth = from_depth.map(|depth| depth.saturating_add(1));
-    for href in &links.hrefs {
-        let classified = coverage.observe_link(
-            profile,
-            from,
-            &document_url,
-            links.base_href.as_deref(),
-            href,
-        );
-        queue_page(
-            records,
-            frontier,
-            limits,
-            PageOffer {
-                classified,
-                click_depth: child_depth,
-                via_website: true,
-                via_sitemap: false,
-                enqueue_fetch: true,
-            },
-        );
+    {
+        let state = &mut *state;
+        for href in &links.hrefs {
+            let classified = state.coverage.observe_link(
+                profile,
+                from,
+                &document_url,
+                links.base_href.as_deref(),
+                href,
+            );
+            queue_page(
+                &mut state.records,
+                &mut state.frontier,
+                limits,
+                PageOffer {
+                    classified,
+                    click_depth: child_depth,
+                    via_website: true,
+                    via_sitemap: false,
+                    enqueue_fetch: true,
+                },
+            );
+        }
+    }
+    if let Some(session) = state.persist.clone() {
+        let persisted = (|| -> Result<(), StoreError> {
+            for record in state.records.values() {
+                session.store.upsert_url(session.run_id, record)?;
+            }
+            session
+                .store
+                .replace_frontier(session.run_id, state.frontier.iter().cloned())?;
+            session
+                .store
+                .replace_links(session.run_id, state.coverage.links())?;
+            Ok(())
+        })();
+        if let Err(err) = persisted {
+            note_persist_error(&mut state, err);
+        }
     }
 }
 
@@ -1030,6 +1371,7 @@ fn slots_used(records: &BTreeMap<String, UrlRecord>) -> usize {
         .filter(|record| {
             record.state == UrlState::Fetched
                 || record.state == UrlState::Failed
+                || record.state == UrlState::InFlight
                 || (record.state == UrlState::Pending && record.reason == REASON_QUEUED)
         })
         .count()
@@ -2048,5 +2390,191 @@ lists_complete = false
             !format!("{report:?}").contains("TESTSIGNATUREVALUE"),
             "credentials must not appear in reports"
         );
+    }
+
+    fn temp_db() -> std::path::PathBuf {
+        static N: AtomicU64 = AtomicU64::new(0);
+        std::env::temp_dir().join(format!(
+            "crawlytic-crawl-store-{}-{}.sqlite",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    fn cleanup_db(path: &std::path::Path) {
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+    }
+
+    #[tokio::test]
+    async fn kill_restart_resumes_without_losing_observations_or_duplicating_findings() {
+        use crate::store::Store;
+        use crate::transport::{FetchRecord, ResourceKind};
+
+        let origin = TestOrigin::https();
+        origin.allow_robots();
+        origin.on("/a", 200, "text/html", "<html>a</html>");
+        origin.on("/b", 200, "text/html", "<html>b</html>");
+        let path = temp_db();
+        let profile = profile_for(&origin);
+        let id_a = identity(&origin, "/a");
+        let id_b = identity(&origin, "/b");
+        let run_id;
+        {
+            let store = Store::open(&path).unwrap().with_batch_size(1);
+            run_id = store.begin_run(&profile).unwrap();
+            store
+                .upsert_url(
+                    run_id,
+                    &UrlRecord {
+                        original: origin.href("/a"),
+                        identity: Some(id_a.clone()),
+                        state: UrlState::Fetched,
+                        reason: REASON_FETCHED.to_owned(),
+                        click_depth: Some(0),
+                        via_website: true,
+                        via_sitemap: false,
+                    },
+                )
+                .unwrap();
+            store
+                .upsert_fetch(
+                    run_id,
+                    &id_a,
+                    &FetchRecord {
+                        requested_url: id_a.as_url().clone(),
+                        destination_url: id_a.as_url().clone(),
+                        status: 200,
+                        content_type: "text/html".into(),
+                        bytes_sampled: 9,
+                        resource_kind: ResourceKind::Page,
+                        credentials_attached: true,
+                        truncated: false,
+                    },
+                    Some(b"<html>a</html>"),
+                )
+                .unwrap();
+            store
+                .upsert_url(
+                    run_id,
+                    &UrlRecord {
+                        original: origin.href("/b"),
+                        identity: Some(id_b.clone()),
+                        state: UrlState::InFlight,
+                        reason: REASON_IN_FLIGHT.to_owned(),
+                        click_depth: Some(1),
+                        via_website: true,
+                        via_sitemap: false,
+                    },
+                )
+                .unwrap();
+            store
+                .put_finding(run_id, "title.duplicate", id_a.as_str(), "observed once")
+                .unwrap();
+            store.flush().unwrap();
+        }
+
+        let store = Store::open(&path).unwrap().with_batch_size(1);
+        store
+            .put_finding(
+                run_id,
+                "title.duplicate",
+                id_a.as_str(),
+                "duplicate attempt",
+            )
+            .unwrap();
+        store.flush().unwrap();
+        assert_eq!(store.findings(run_id).unwrap().len(), 1);
+        let toml = store.stored_profile_toml(run_id).unwrap();
+        assert!(!toml.to_ascii_lowercase().contains("sig1="));
+        assert!(!toml.contains(SIGNATURE));
+
+        let mut lim = limits();
+        lim.concurrency = 1;
+        let transport = SignedTransport::new_with_client(client(), origin.url(), &auth());
+        let mut crawl = Crawler::resume_with_transport(
+            store.clone(),
+            run_id,
+            transport,
+            lim,
+            CancelHandle::new(),
+        )
+        .unwrap();
+        let report = crawl.run().await;
+        assert!(report.completed, "{report:?}");
+        assert_eq!(report.url(&id_a).unwrap().state, UrlState::Fetched);
+        assert_eq!(report.url(&id_a).unwrap().reason, REASON_FETCHED);
+        assert_eq!(report.url(&id_b).unwrap().state, UrlState::Fetched);
+        assert_eq!(
+            origin
+                .page_paths()
+                .iter()
+                .filter(|path| *path == "/a")
+                .count(),
+            0,
+            "completed observations must not be fetched again: {:?}",
+            origin.page_paths()
+        );
+        assert_eq!(
+            origin
+                .page_paths()
+                .iter()
+                .filter(|path| *path == "/b")
+                .count(),
+            1,
+            "in-flight URLs must be retried: {:?}",
+            origin.page_paths()
+        );
+        let loaded = store.load_run(run_id).unwrap();
+        assert!(loaded.completed);
+        assert_eq!(loaded.findings.len(), 1);
+        assert_eq!(loaded.findings[0].evidence, "observed once");
+        assert!(
+            loaded.fetches.iter().any(|fetch| {
+                fetch.requested_url.as_str() == id_a.as_str() && fetch.status == 200
+            })
+        );
+        assert_signed(&origin);
+        cleanup_db(&path);
+    }
+
+    #[tokio::test]
+    async fn live_store_checkpoint_complements_kill_restart_fixture() {
+        use crate::store::Store;
+
+        let origin = TestOrigin::https();
+        origin.allow_robots();
+        origin.on("/one", 200, "text/html", "<html>one</html>");
+        origin.on("/two", 200, "text/html", "<html>two</html>");
+        let path = temp_db();
+        let store = Store::open(&path).unwrap().with_batch_size(1);
+        let profile = profile_for(&origin);
+        let run_id = store.begin_run(&profile).unwrap();
+        let mut lim = limits();
+        lim.concurrency = 1;
+        let mut crawl = crawler(&origin, lim);
+        crawl.persist_on(store.clone(), run_id);
+        crawl.offer(&origin.href("/one"));
+        crawl.offer(&origin.href("/two"));
+        let report = crawl.run().await;
+        assert!(report.completed);
+        assert!(report.persist_error.is_none());
+        drop(crawl);
+        let loaded = Store::open(&path).unwrap().load_run(run_id).unwrap();
+        assert!(loaded.completed);
+        assert_eq!(
+            loaded
+                .urls
+                .iter()
+                .filter(|url| url.state == UrlState::Fetched)
+                .count(),
+            2
+        );
+        let settings = loaded.profile_toml.to_ascii_lowercase();
+        assert!(!settings.contains("sig1="));
+        assert!(!settings.contains("signature:"));
+        assert_signed(&origin);
+        cleanup_db(&path);
     }
 }

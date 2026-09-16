@@ -49,7 +49,7 @@ locations are recorded and never receive credentials.
 
 ## Boundaries
 
-- `crawlytic-core`: profile, URL identity/scope, robots policy, Web Bot Auth transport, bounded crawl and homepage/sitemap discovery; no terminal dependency.
+- `crawlytic-core`: profile, URL identity/scope, robots policy, Web Bot Auth transport, bounded crawl, homepage/sitemap discovery and SQLite run persistence; no terminal dependency.
 - `crawlytic`: Ratatui rendering, key input and background-task coordination.
 - Future interfaces can use the core without depending on Ratatui.
 
@@ -67,15 +67,21 @@ six result states), bounded async crawl (frontier, worker pool, per-origin pace 
 `crawl_delay = minimum`, independent URL/queue/response-size caps, 429/503 Retry-After
 backoff with a retry budget, cancellation that classifies outstanding URLs),
 homepage-link discovery and independent sitemap inventory (indexes, gzip, size/depth/cycle
-bounds, cross-origin locations refused without forwarding credentials). Checkers
+bounds, cross-origin locations refused without forwarding credentials),
+SQLite persistence for runs, sanitized profile snapshots, URL states, fetch evidence,
+links, resource references, sitemap membership and idempotent findings. Checkers
 are not shipped; live evaluation is `unsupported` until owner issues land. Current 14
 September 2026 findings are stored separately from the historical "new issues" column.
 No-count rows are not failures. Duplicate fetch identities are scheduled once. Every URL
 ends fetched, excluded, blocked, failed or pending with a reason. A cancelled run is not
 complete. Authentication failures do not continue unsigned. Sitemap-only URLs do not get
-click depth 0.
+click depth 0. A kill/restart resumes without refetching completed observations; in-flight
+URLs are retried. Stored settings keep environment references only and never Signature or
+Signature-Input values. Disk-full and migration failures are visible and leave the run
+incomplete. Raw HTML retention is off by default and quota-bounded when enabled. An
+uncommitted writer batch (default 32 statements) can be lost on crash.
 
-Not implemented: rule checkers, SQLite history,
+Not implemented: rule checkers, cross-run finding history,
 scheduling, credential editing/storage, mobile rendering or JS.
 The page cap (20,000) and historical 3,725-page observation are not catalogue size.
 Weekly Monday is recorded without a time, timezone, or scheduler.
@@ -90,9 +96,9 @@ lists it as an ignored parameter. Path slash variants and query order stay disti
 
 ## Next milestones
 
-1. SQLite runs and shortest-path depth from the homepage graph; sitemaps stay separate evidence.
+1. Shortest-path depth from the homepage graph; sitemaps stay separate evidence.
 2. Metadata/link/canonical checks with evidence; then the broader Semrush catalogue.
-3. History, scheduled headless runs and exports. A web UI can follow independently.
+3. Cross-run history, scheduled headless runs and exports. A web UI can follow independently.
 
 Recorded TiendaCables settings: www.tiendacables.com; 20,000 page cap; 3,725-page
 historical observation (not an invariant); homepage-link discovery; JS off; crawl
@@ -125,8 +131,10 @@ requests with bypass off, and an explicit owner-audit override retained in run
 metadata. Crawl fixtures cover duplicate identities, independent URL/queue/body caps,
 429/503 backoff, unsigned-fallback refusal, robots blocks, cancellation, homepage-link
 discovery, sitemap inventory (including gzip, cycles, oversized/parse/inaccessible files)
-and refused cross-origin sitemap locations. They do
-not contact the storefront.
+and refused cross-origin sitemap locations. Persistence fixtures cover kill/restart resume
+without duplicate findings, in-flight retry, secret-free stored settings, writer batching,
+optional HTML quotas, and visible disk-full/migration failures that leave partial runs
+incomplete. They do not contact the storefront.
 
 A user-reported or local `p` sample is operator evidence only. It is not recorded in
 this repository, is not covered by the default `cargo test` run, and is not proof that
