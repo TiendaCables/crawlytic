@@ -3,6 +3,7 @@ mod catalogue;
 mod crawl;
 mod discovery;
 mod engine;
+mod extract;
 mod profile;
 mod robots;
 mod scope;
@@ -26,6 +27,11 @@ pub use engine::{
     CommandHandle, CommandSendError, CrawlCommand, CrawlCounters, CrawlEvent,
     DISCRETE_EVENT_CAPACITY, Diagnostic, DiagnosticKind, DisplayedUserAgent, Engine, EngineConfig,
     FetchCompletion, ProgressSnapshot, SessionStatus, StatusEvent,
+};
+pub use extract::{
+    EXTRACTION_SCHEMA_VERSION, EmbeddedKind, ExtractHeader, ExtractInput, ExtractedObservations,
+    Heading, HostOwner, Hreflang, LinkObservation, ObservationFlags, PageObservation,
+    ResourceObservation, extract,
 };
 pub use profile::{
     CrawlDelay, DiscoveryMode, IgnoredParameterMode, Profile, ProfileRole, SCHEMA_VERSION,

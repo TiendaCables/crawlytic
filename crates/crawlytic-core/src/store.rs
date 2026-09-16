@@ -9,6 +9,10 @@ use crate::catalogue::{CATALOGUE_VERSION, FIXTURE_CONTRACT_VERSION};
 use crate::crawl::{
     SitemapFileRecord, SitemapFileState, SitemapInventory, SitemapUrlRecord, UrlRecord, UrlState,
 };
+use crate::extract::{
+    EmbeddedKind, ExtractedObservations, Heading, HostOwner, Hreflang, LinkObservation,
+    ObservationFlags, PageObservation, ResourceObservation,
+};
 use crate::profile::Profile;
 use crate::scope::{CoverageLink, CoverageUrl, FetchIdentity};
 use crate::transport::{FetchRecord, ResourceKind};
@@ -19,7 +23,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use url::Url;
 
-pub const STORE_SCHEMA_VERSION: i64 = 1;
+pub const STORE_SCHEMA_VERSION: i64 = 2;
 const DEFAULT_BATCH_SIZE: usize = 32;
 
 const MIGRATION_1: &str = "
@@ -123,6 +127,105 @@ CREATE TABLE findings (
 CREATE TABLE store_settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
+);
+";
+
+const MIGRATION_2: &str = "
+CREATE TABLE page_observations (
+    run_id INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    identity TEXT NOT NULL,
+    schema_version INTEGER NOT NULL,
+    complete INTEGER NOT NULL,
+    truncated INTEGER NOT NULL,
+    challenge INTEGER NOT NULL,
+    error_status INTEGER NOT NULL,
+    non_html INTEGER NOT NULL,
+    encoding_fallback INTEGER NOT NULL,
+    status INTEGER NOT NULL,
+    content_type TEXT NOT NULL,
+    duration_ms INTEGER,
+    raw_bytes INTEGER NOT NULL,
+    decoded_bytes INTEGER NOT NULL,
+    encoding TEXT NOT NULL,
+    doctype TEXT,
+    html_lang TEXT,
+    viewport TEXT,
+    text TEXT NOT NULL,
+    PRIMARY KEY (run_id, identity)
+);
+CREATE TABLE observation_titles (
+    run_id INTEGER NOT NULL,
+    identity TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    text TEXT NOT NULL,
+    PRIMARY KEY (run_id, identity, seq)
+);
+CREATE TABLE observation_descriptions (
+    run_id INTEGER NOT NULL,
+    identity TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    text TEXT NOT NULL,
+    PRIMARY KEY (run_id, identity, seq)
+);
+CREATE TABLE observation_headings (
+    run_id INTEGER NOT NULL,
+    identity TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    level INTEGER NOT NULL,
+    text TEXT NOT NULL,
+    PRIMARY KEY (run_id, identity, seq)
+);
+CREATE TABLE observation_robots_meta (
+    run_id INTEGER NOT NULL,
+    identity TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    text TEXT NOT NULL,
+    PRIMARY KEY (run_id, identity, seq)
+);
+CREATE TABLE observation_robots_headers (
+    run_id INTEGER NOT NULL,
+    identity TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    text TEXT NOT NULL,
+    PRIMARY KEY (run_id, identity, seq)
+);
+CREATE TABLE observation_canonicals (
+    run_id INTEGER NOT NULL,
+    identity TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    text TEXT NOT NULL,
+    PRIMARY KEY (run_id, identity, seq)
+);
+CREATE TABLE observation_hreflangs (
+    run_id INTEGER NOT NULL,
+    identity TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    lang TEXT NOT NULL,
+    href TEXT NOT NULL,
+    PRIMARY KEY (run_id, identity, seq)
+);
+CREATE TABLE link_observations (
+    run_id INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    seq INTEGER NOT NULL,
+    source TEXT NOT NULL,
+    href TEXT NOT NULL,
+    destination TEXT,
+    anchor TEXT NOT NULL,
+    rel TEXT NOT NULL,
+    element TEXT NOT NULL,
+    host_owner TEXT NOT NULL,
+    PRIMARY KEY (run_id, seq)
+);
+CREATE TABLE resource_observations (
+    run_id INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    seq INTEGER NOT NULL,
+    referring TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    href TEXT NOT NULL,
+    destination TEXT,
+    alt TEXT,
+    host_owner TEXT NOT NULL,
+    PRIMARY KEY (run_id, seq)
 );
 ";
 
@@ -268,6 +371,7 @@ pub struct LoadedRun {
     pub sitemap: SitemapInventory,
     pub sitemap_done: bool,
     pub findings: Vec<FindingRecord>,
+    pub observations: Vec<ExtractedObservations>,
 }
 
 #[derive(Clone)]
@@ -614,6 +718,191 @@ impl Store {
         Ok(())
     }
 
+    pub fn put_observation(
+        &self,
+        run_id: i64,
+        observation: &ExtractedObservations,
+    ) -> Result<(), StoreError> {
+        let mut inner = self.lock();
+        inner.write(|conn| {
+            let identity = observation.identity.as_str();
+            conn.execute(
+                "DELETE FROM observation_titles WHERE run_id = ?1 AND identity = ?2",
+                params![run_id, identity],
+            )?;
+            conn.execute(
+                "DELETE FROM observation_descriptions WHERE run_id = ?1 AND identity = ?2",
+                params![run_id, identity],
+            )?;
+            conn.execute(
+                "DELETE FROM observation_headings WHERE run_id = ?1 AND identity = ?2",
+                params![run_id, identity],
+            )?;
+            conn.execute(
+                "DELETE FROM observation_robots_meta WHERE run_id = ?1 AND identity = ?2",
+                params![run_id, identity],
+            )?;
+            conn.execute(
+                "DELETE FROM observation_robots_headers WHERE run_id = ?1 AND identity = ?2",
+                params![run_id, identity],
+            )?;
+            conn.execute(
+                "DELETE FROM observation_canonicals WHERE run_id = ?1 AND identity = ?2",
+                params![run_id, identity],
+            )?;
+            conn.execute(
+                "DELETE FROM observation_hreflangs WHERE run_id = ?1 AND identity = ?2",
+                params![run_id, identity],
+            )?;
+            conn.execute(
+                "DELETE FROM link_observations WHERE run_id = ?1 AND source = ?2",
+                params![run_id, identity],
+            )?;
+            conn.execute(
+                "DELETE FROM resource_observations WHERE run_id = ?1 AND referring = ?2",
+                params![run_id, identity],
+            )?;
+            let page = &observation.page;
+            conn.execute(
+                "INSERT INTO page_observations(
+                    run_id, identity, schema_version, complete, truncated, challenge,
+                    error_status, non_html, encoding_fallback, status, content_type,
+                    duration_ms, raw_bytes, decoded_bytes, encoding, doctype, html_lang,
+                    viewport, text
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
+                 ON CONFLICT(run_id, identity) DO UPDATE SET
+                    schema_version=excluded.schema_version,
+                    complete=excluded.complete,
+                    truncated=excluded.truncated,
+                    challenge=excluded.challenge,
+                    error_status=excluded.error_status,
+                    non_html=excluded.non_html,
+                    encoding_fallback=excluded.encoding_fallback,
+                    status=excluded.status,
+                    content_type=excluded.content_type,
+                    duration_ms=excluded.duration_ms,
+                    raw_bytes=excluded.raw_bytes,
+                    decoded_bytes=excluded.decoded_bytes,
+                    encoding=excluded.encoding,
+                    doctype=excluded.doctype,
+                    html_lang=excluded.html_lang,
+                    viewport=excluded.viewport,
+                    text=excluded.text",
+                params![
+                    run_id,
+                    identity,
+                    page.schema_version as i64,
+                    page.is_complete() as i64,
+                    page.flags.truncated as i64,
+                    page.flags.challenge as i64,
+                    page.flags.error_status as i64,
+                    page.flags.non_html as i64,
+                    page.flags.encoding_fallback as i64,
+                    page.status,
+                    page.content_type,
+                    page.duration_ms.map(|ms| ms as i64),
+                    page.raw_bytes as i64,
+                    page.decoded_bytes as i64,
+                    page.encoding,
+                    page.doctype,
+                    page.html_lang,
+                    page.viewport,
+                    page.text,
+                ],
+            )?;
+            insert_strings(conn, "observation_titles", run_id, identity, &page.titles)?;
+            insert_strings(
+                conn,
+                "observation_descriptions",
+                run_id,
+                identity,
+                &page.descriptions,
+            )?;
+            for (seq, heading) in page.headings.iter().enumerate() {
+                conn.execute(
+                    "INSERT INTO observation_headings(run_id, identity, seq, level, text)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![run_id, identity, seq as i64, heading.level, heading.text],
+                )?;
+            }
+            insert_strings(
+                conn,
+                "observation_robots_meta",
+                run_id,
+                identity,
+                &page.robots_meta,
+            )?;
+            insert_strings(
+                conn,
+                "observation_robots_headers",
+                run_id,
+                identity,
+                &page.robots_headers,
+            )?;
+            insert_strings(
+                conn,
+                "observation_canonicals",
+                run_id,
+                identity,
+                &page.canonicals,
+            )?;
+            for (seq, item) in page.hreflangs.iter().enumerate() {
+                conn.execute(
+                    "INSERT INTO observation_hreflangs(run_id, identity, seq, lang, href)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![run_id, identity, seq as i64, item.lang, item.href],
+                )?;
+            }
+            let link_start: i64 = conn.query_row(
+                "SELECT COALESCE(MAX(seq), -1) + 1 FROM link_observations WHERE run_id = ?1",
+                params![run_id],
+                |row| row.get(0),
+            )?;
+            for (offset, link) in observation.links.iter().enumerate() {
+                conn.execute(
+                    "INSERT INTO link_observations(
+                        run_id, seq, source, href, destination, anchor, rel, element, host_owner
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    params![
+                        run_id,
+                        link_start + offset as i64,
+                        link.source,
+                        link.href,
+                        link.destination,
+                        link.anchor,
+                        link.rel,
+                        link.element,
+                        link.host_owner.as_str(),
+                    ],
+                )?;
+            }
+            let resource_start: i64 = conn.query_row(
+                "SELECT COALESCE(MAX(seq), -1) + 1 FROM resource_observations WHERE run_id = ?1",
+                params![run_id],
+                |row| row.get(0),
+            )?;
+            for (offset, resource) in observation.resources.iter().enumerate() {
+                conn.execute(
+                    "INSERT INTO resource_observations(
+                        run_id, seq, referring, kind, href, destination, alt, host_owner
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    params![
+                        run_id,
+                        resource_start + offset as i64,
+                        resource.referring,
+                        resource.kind.as_str(),
+                        resource.href,
+                        resource.destination,
+                        resource.alt,
+                        resource.host_owner.as_str(),
+                    ],
+                )?;
+            }
+            Ok(())
+        })?;
+        Ok(())
+    }
+
     pub fn put_finding(
         &self,
         run_id: i64,
@@ -782,7 +1071,7 @@ fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
         );",
     )
     .map_err(|err| StoreError::migration(err.to_string()))?;
-    let current: i64 = tx
+    let mut current: i64 = tx
         .query_row(
             "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
             [],
@@ -794,12 +1083,22 @@ fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
             "database schema {current} is newer than {STORE_SCHEMA_VERSION}"
         )));
     }
-    if current < STORE_SCHEMA_VERSION {
+    if current < 1 {
         tx.execute_batch(MIGRATION_1)
             .map_err(|err| StoreError::migration(err.to_string()))?;
         tx.execute(
             "INSERT INTO schema_migrations(version, applied_at) VALUES (?1, ?2)",
-            params![STORE_SCHEMA_VERSION, now_secs()],
+            params![1, now_secs()],
+        )
+        .map_err(|err| StoreError::migration(err.to_string()))?;
+        current = 1;
+    }
+    if current < 2 {
+        tx.execute_batch(MIGRATION_2)
+            .map_err(|err| StoreError::migration(err.to_string()))?;
+        tx.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (?1, ?2)",
+            params![2, now_secs()],
         )
         .map_err(|err| StoreError::migration(err.to_string()))?;
     }
@@ -881,6 +1180,7 @@ fn load_run_from(conn: &Connection, run_id: i64) -> Result<LoadedRun, StoreError
     let resources = load_resources(conn, run_id)?;
     let sitemap = load_sitemap(conn, run_id)?;
     let findings = load_findings(conn, run_id)?;
+    let observations = load_observations(conn, run_id)?;
     Ok(LoadedRun {
         id: run_id,
         profile,
@@ -899,6 +1199,7 @@ fn load_run_from(conn: &Connection, run_id: i64) -> Result<LoadedRun, StoreError
         sitemap,
         sitemap_done: sitemap_done != 0,
         findings,
+        observations,
     })
 }
 
@@ -1042,6 +1343,9 @@ fn load_fetches(conn: &Connection, run_id: i64) -> Result<Vec<FetchRecord>, Stor
             resource_kind: parse_resource_kind(&kind)?,
             credentials_attached: credentials_attached != 0,
             truncated: truncated != 0,
+            duration_ms: 0,
+            robots_tag_headers: Vec::new(),
+            link_headers: Vec::new(),
         });
     }
     Ok(fetches)
@@ -1154,6 +1458,279 @@ fn load_findings(conn: &Connection, run_id: i64) -> Result<Vec<FindingRecord>, S
         findings.push(row.map_err(map_write)?);
     }
     Ok(findings)
+}
+
+fn insert_strings(
+    conn: &Connection,
+    table: &str,
+    run_id: i64,
+    identity: &str,
+    values: &[String],
+) -> rusqlite::Result<()> {
+    let sql = format!("INSERT INTO {table}(run_id, identity, seq, text) VALUES (?1, ?2, ?3, ?4)");
+    for (seq, text) in values.iter().enumerate() {
+        conn.execute(&sql, params![run_id, identity, seq as i64, text])?;
+    }
+    Ok(())
+}
+
+fn load_string_list(
+    conn: &Connection,
+    table: &str,
+    run_id: i64,
+    identity: &str,
+) -> Result<Vec<String>, StoreError> {
+    let sql = format!("SELECT text FROM {table} WHERE run_id = ?1 AND identity = ?2 ORDER BY seq");
+    let mut stmt = conn.prepare(&sql).map_err(map_write)?;
+    let rows = stmt
+        .query_map(params![run_id, identity], |row| row.get::<_, String>(0))
+        .map_err(map_write)?;
+    let mut values = Vec::new();
+    for row in rows {
+        values.push(row.map_err(map_write)?);
+    }
+    Ok(values)
+}
+
+fn load_observations(
+    conn: &Connection,
+    run_id: i64,
+) -> Result<Vec<ExtractedObservations>, StoreError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT identity, schema_version, complete, truncated, challenge, error_status,
+                    non_html, encoding_fallback, status, content_type, duration_ms,
+                    raw_bytes, decoded_bytes, encoding, doctype, html_lang, viewport, text
+             FROM page_observations WHERE run_id = ?1 ORDER BY identity",
+        )
+        .map_err(map_write)?;
+    let rows = stmt
+        .query_map(params![run_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, i64>(7)?,
+                row.get::<_, u16>(8)?,
+                row.get::<_, String>(9)?,
+                row.get::<_, Option<i64>>(10)?,
+                row.get::<_, i64>(11)?,
+                row.get::<_, i64>(12)?,
+                row.get::<_, String>(13)?,
+                row.get::<_, Option<String>>(14)?,
+                row.get::<_, Option<String>>(15)?,
+                row.get::<_, Option<String>>(16)?,
+                row.get::<_, String>(17)?,
+            ))
+        })
+        .map_err(map_write)?;
+    let mut pages = Vec::new();
+    for row in rows {
+        pages.push(row.map_err(map_write)?);
+    }
+    let mut observations = Vec::new();
+    for page in pages {
+        let (
+            identity,
+            schema_version,
+            _complete,
+            truncated,
+            challenge,
+            error_status,
+            non_html,
+            encoding_fallback,
+            status,
+            content_type,
+            duration_ms,
+            raw_bytes,
+            decoded_bytes,
+            encoding,
+            doctype,
+            html_lang,
+            viewport,
+            text,
+        ) = page;
+        let headings = load_headings(conn, run_id, &identity)?;
+        let hreflangs = load_hreflangs(conn, run_id, &identity)?;
+        observations.push(ExtractedObservations {
+            schema_version: schema_version as u32,
+            identity: identity.clone(),
+            page: PageObservation {
+                schema_version: schema_version as u32,
+                flags: ObservationFlags {
+                    truncated: truncated != 0,
+                    challenge: challenge != 0,
+                    error_status: error_status != 0,
+                    non_html: non_html != 0,
+                    encoding_fallback: encoding_fallback != 0,
+                },
+                status,
+                content_type,
+                duration_ms: duration_ms.map(|ms| ms as u64),
+                raw_bytes: raw_bytes as u64,
+                decoded_bytes: decoded_bytes as u64,
+                encoding,
+                doctype,
+                html_lang,
+                titles: load_string_list(conn, "observation_titles", run_id, &identity)?,
+                descriptions: load_string_list(
+                    conn,
+                    "observation_descriptions",
+                    run_id,
+                    &identity,
+                )?,
+                headings,
+                robots_meta: load_string_list(conn, "observation_robots_meta", run_id, &identity)?,
+                robots_headers: load_string_list(
+                    conn,
+                    "observation_robots_headers",
+                    run_id,
+                    &identity,
+                )?,
+                canonicals: load_string_list(conn, "observation_canonicals", run_id, &identity)?,
+                hreflangs,
+                viewport,
+                text,
+            },
+            links: load_link_observations(conn, run_id, &identity)?,
+            resources: load_resource_observations(conn, run_id, &identity)?,
+        });
+    }
+    Ok(observations)
+}
+
+fn load_headings(
+    conn: &Connection,
+    run_id: i64,
+    identity: &str,
+) -> Result<Vec<Heading>, StoreError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT level, text FROM observation_headings
+             WHERE run_id = ?1 AND identity = ?2 ORDER BY seq",
+        )
+        .map_err(map_write)?;
+    let rows = stmt
+        .query_map(params![run_id, identity], |row| {
+            Ok((row.get::<_, u8>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(map_write)?;
+    let mut headings = Vec::new();
+    for row in rows {
+        let (level, text) = row.map_err(map_write)?;
+        headings.push(Heading { level, text });
+    }
+    Ok(headings)
+}
+
+fn load_hreflangs(
+    conn: &Connection,
+    run_id: i64,
+    identity: &str,
+) -> Result<Vec<Hreflang>, StoreError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT lang, href FROM observation_hreflangs
+             WHERE run_id = ?1 AND identity = ?2 ORDER BY seq",
+        )
+        .map_err(map_write)?;
+    let rows = stmt
+        .query_map(params![run_id, identity], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(map_write)?;
+    let mut items = Vec::new();
+    for row in rows {
+        let (lang, href) = row.map_err(map_write)?;
+        items.push(Hreflang { lang, href });
+    }
+    Ok(items)
+}
+
+fn load_link_observations(
+    conn: &Connection,
+    run_id: i64,
+    identity: &str,
+) -> Result<Vec<LinkObservation>, StoreError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT source, href, destination, anchor, rel, element, host_owner
+             FROM link_observations WHERE run_id = ?1 AND source = ?2 ORDER BY seq",
+        )
+        .map_err(map_write)?;
+    let rows = stmt
+        .query_map(params![run_id, identity], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+            ))
+        })
+        .map_err(map_write)?;
+    let mut links = Vec::new();
+    for row in rows {
+        let (source, href, destination, anchor, rel, element, host_owner) =
+            row.map_err(map_write)?;
+        links.push(LinkObservation {
+            source,
+            href,
+            destination,
+            anchor,
+            rel,
+            element,
+            host_owner: HostOwner::parse(&host_owner)
+                .ok_or_else(|| StoreError::other(format!("Unknown host owner {host_owner}")))?,
+        });
+    }
+    Ok(links)
+}
+
+fn load_resource_observations(
+    conn: &Connection,
+    run_id: i64,
+    identity: &str,
+) -> Result<Vec<ResourceObservation>, StoreError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT referring, kind, href, destination, alt, host_owner
+             FROM resource_observations WHERE run_id = ?1 AND referring = ?2 ORDER BY seq",
+        )
+        .map_err(map_write)?;
+    let rows = stmt
+        .query_map(params![run_id, identity], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, String>(5)?,
+            ))
+        })
+        .map_err(map_write)?;
+    let mut resources = Vec::new();
+    for row in rows {
+        let (referring, kind, href, destination, alt, host_owner) = row.map_err(map_write)?;
+        resources.push(ResourceObservation {
+            referring,
+            kind: EmbeddedKind::parse(&kind)
+                .ok_or_else(|| StoreError::other(format!("Unknown resource kind {kind}")))?,
+            href,
+            destination,
+            alt,
+            host_owner: HostOwner::parse(&host_owner)
+                .ok_or_else(|| StoreError::other(format!("Unknown host owner {host_owner}")))?,
+        });
+    }
+    Ok(resources)
 }
 
 pub(crate) fn serialize_profile(profile: &Profile) -> Result<String, StoreError> {
@@ -1417,6 +1994,9 @@ mod tests {
             resource_kind: ResourceKind::Page,
             credentials_attached: true,
             truncated: false,
+            duration_ms: 0,
+            robots_tag_headers: Vec::new(),
+            link_headers: Vec::new(),
         };
         store
             .upsert_fetch(run_id, &id, &record, Some(b"<html>"))
@@ -1493,5 +2073,60 @@ mod tests {
         assert!(!loaded.completed);
         assert_ne!(loaded.status, RunStatus::Completed);
         cleanup(&path);
+    }
+
+    #[test]
+    fn extracted_observations_round_trip_without_severity() {
+        use crate::extract::{ExtractHeader, ExtractInput, extract};
+        let store = Store::open_in_memory().unwrap();
+        let run_id = store.begin_run(&sample_profile()).unwrap();
+        let url = Url::parse("https://www.tiendacables.com/es").unwrap();
+        let headers = [ExtractHeader {
+            name: "X-Robots-Tag",
+            value: "noindex",
+        }];
+        let obs = extract(&ExtractInput {
+            destination_url: &url,
+            status: 200,
+            content_type: "text/html",
+            headers: &headers,
+            body: br#"<html><head><title>Hi</title>
+                <link rel="canonical" href="/es">
+                </head><body>
+                <a href="/next">Next</a>
+                <img src="https://cdn.example.com/a.png" alt="A">
+                </body></html>"#,
+            truncated: false,
+            duration_ms: Some(9),
+        });
+        assert!(obs.page.is_complete());
+        store.put_observation(run_id, &obs).unwrap();
+        store.flush().unwrap();
+        let loaded = store.load_run(run_id).unwrap();
+        assert_eq!(loaded.observations, vec![obs]);
+        let dump = format!("{:?}", loaded.observations);
+        assert!(!dump.to_ascii_lowercase().contains("severity"));
+    }
+
+    #[test]
+    fn truncated_observation_is_not_stored_as_complete() {
+        use crate::extract::{ExtractInput, extract};
+        let store = Store::open_in_memory().unwrap();
+        let run_id = store.begin_run(&sample_profile()).unwrap();
+        let url = Url::parse("https://www.tiendacables.com/").unwrap();
+        let obs = extract(&ExtractInput {
+            destination_url: &url,
+            status: 200,
+            content_type: "text/html",
+            headers: &[],
+            body: b"<html><title>Partial",
+            truncated: true,
+            duration_ms: None,
+        });
+        store.put_observation(run_id, &obs).unwrap();
+        store.flush().unwrap();
+        let loaded = store.load_run(run_id).unwrap();
+        assert!(!loaded.observations[0].page.is_complete());
+        assert!(loaded.observations[0].page.flags.truncated);
     }
 }

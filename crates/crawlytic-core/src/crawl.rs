@@ -12,6 +12,7 @@ use crate::auth::WebBotAuth;
 use crate::discovery::{
     ParsedSitemap, decode_sitemap_body, extract_navigational_links, parse_sitemap_xml,
 };
+use crate::extract::{ExtractHeader, ExtractInput, ExtractedObservations, extract};
 use crate::profile::Profile;
 use crate::robots::{AllowReason, RobotsCache, RobotsFile, RobotsRunMetadata, UrlAccess};
 use crate::scope::{ClassifiedUrl, Coverage, CoverageLink, FetchIdentity, classify_href};
@@ -244,6 +245,7 @@ pub struct CrawlReport {
     pub robots: Option<RobotsRunMetadata>,
     pub sitemap: SitemapInventory,
     pub links: Vec<CoverageLink>,
+    pub observations: Vec<ExtractedObservations>,
 }
 
 impl CrawlReport {
@@ -276,6 +278,7 @@ pub struct Crawler {
     sitemap: SitemapInventory,
     sitemap_done: bool,
     notify: CrawlNotify,
+    observations: Vec<ExtractedObservations>,
 }
 
 impl Crawler {
@@ -307,6 +310,7 @@ impl Crawler {
             sitemap: SitemapInventory::default(),
             sitemap_done: false,
             notify: CrawlNotify::default(),
+            observations: Vec::new(),
         }
     }
 
@@ -391,6 +395,7 @@ impl Crawler {
                     None,
                     SitemapInventory::default(),
                     self.coverage.links(),
+                    Vec::new(),
                 );
             }
             Err(_) => None,
@@ -467,6 +472,7 @@ impl Crawler {
                             robots_meta,
                             inventory,
                             self.coverage.links(),
+                            Vec::new(),
                         ),
                         persist_error,
                     );
@@ -496,6 +502,7 @@ impl Crawler {
                     robots_meta,
                     sitemap,
                     self.coverage.links(),
+                    Vec::new(),
                 ),
                 persist_error,
             );
@@ -518,6 +525,7 @@ impl Crawler {
                     robots_meta,
                     sitemap,
                     self.coverage.links(),
+                    Vec::new(),
                 ),
                 Some(err.to_string()),
             );
@@ -531,6 +539,7 @@ impl Crawler {
             persist: self.persist.clone(),
             persist_error: None,
             notify: self.notify.clone(),
+            observations: std::mem::take(&mut self.observations),
         }));
         let gate = Arc::new(tokio::sync::Mutex::new(None::<tokio::time::Instant>));
         let mut tasks = tokio::task::JoinSet::new();
@@ -622,6 +631,8 @@ impl Crawler {
         self.records = std::mem::take(&mut state.records);
         self.frontier = std::mem::take(&mut state.frontier);
         self.coverage = std::mem::take(&mut state.coverage);
+        self.observations = std::mem::take(&mut state.observations);
+        let observations = self.observations.clone();
         stamp_sitemap_provenance(&mut self.records, &sitemap);
         let persist_error = persist_error.or_else(|| {
             persist_checkpoint(
@@ -650,6 +661,7 @@ impl Crawler {
                 robots_meta,
                 sitemap,
                 self.coverage.links(),
+                observations,
             ),
             persist_error,
         )
@@ -664,6 +676,7 @@ struct RunState {
     persist: Option<PersistSession>,
     persist_error: Option<String>,
     notify: CrawlNotify,
+    observations: Vec<ExtractedObservations>,
 }
 
 struct PageOffer {
@@ -748,6 +761,7 @@ async fn process_one(
                 };
                 set_record(&shared, &identity, UrlState::Fetched, reason).await;
                 persist_fetch(&shared, &identity, &record, &body).await;
+                persist_observation(&shared, &identity, &record, &body).await;
                 if profile.discovery_mode.follows_website_links() {
                     discover_html_links(&profile, &limits, &identity, &body, &shared).await;
                 }
@@ -862,6 +876,7 @@ fn report(
     robots: Option<RobotsRunMetadata>,
     sitemap: SitemapInventory,
     links: &[CoverageLink],
+    observations: Vec<ExtractedObservations>,
 ) -> CrawlReport {
     CrawlReport {
         completed,
@@ -871,6 +886,7 @@ fn report(
         robots,
         sitemap,
         links: links.to_vec(),
+        observations,
     }
 }
 
@@ -925,6 +941,7 @@ fn restore_into(crawler: &mut Crawler, loaded: LoadedRun) {
     crawler.coverage = Coverage::restore(loaded.coverage_urls, loaded.links);
     crawler.sitemap = loaded.sitemap;
     crawler.sitemap_done = loaded.sitemap_done;
+    crawler.observations = loaded.observations;
 }
 
 fn persist_checkpoint(
@@ -1022,6 +1039,39 @@ async fn persist_fetch(
     ) {
         note_persist_error(&mut state, err);
     }
+}
+
+async fn persist_observation(
+    shared: &tokio::sync::Mutex<RunState>,
+    identity: &FetchIdentity,
+    record: &crate::transport::FetchRecord,
+    body: &[u8],
+) {
+    let mut headers: Vec<ExtractHeader<'_>> = Vec::new();
+    headers.extend(record.robots_tag_headers.iter().map(|value| ExtractHeader {
+        name: "x-robots-tag",
+        value,
+    }));
+    headers.extend(record.link_headers.iter().map(|value| ExtractHeader {
+        name: "link",
+        value,
+    }));
+    let observation = extract(&ExtractInput {
+        destination_url: identity.as_url(),
+        status: record.status,
+        content_type: &record.content_type,
+        headers: &headers,
+        body,
+        truncated: record.truncated,
+        duration_ms: Some(record.duration_ms),
+    });
+    let mut state = shared.lock().await;
+    if let Some(session) = state.persist.clone()
+        && let Err(err) = session.store.put_observation(session.run_id, &observation)
+    {
+        note_persist_error(&mut state, err);
+    }
+    state.observations.push(observation);
 }
 
 fn record_key_for(record: &UrlRecord) -> String {
@@ -2499,6 +2549,9 @@ lists_complete = false
                         resource_kind: ResourceKind::Page,
                         credentials_attached: true,
                         truncated: false,
+                        duration_ms: 0,
+                        robots_tag_headers: Vec::new(),
+                        link_headers: Vec::new(),
                     },
                     Some(b"<html>a</html>"),
                 )
@@ -2584,6 +2637,64 @@ lists_complete = false
             })
         );
         assert_signed(&origin);
+        cleanup_db(&path);
+    }
+
+    #[tokio::test]
+    async fn truncated_bodies_are_not_complete_seo_observations() {
+        use crate::extract::HostOwner;
+        use crate::store::Store;
+
+        let origin = TestOrigin::https();
+        origin.allow_robots();
+        origin.on(
+            "/",
+            200,
+            "text/html",
+            "<html><title>Home</title><a href='/big'>n</a><img src='/l.png'></html>",
+        );
+        origin.on(
+            "/big",
+            200,
+            "text/html",
+            "<html><head><title>A very long title that will be truncated before the close tagXXXX",
+        );
+        let mut limits = limits();
+        limits.max_response_bytes = 80;
+        limits.concurrency = 1;
+        let path = temp_db();
+        let store = Store::open(&path).unwrap().with_batch_size(1);
+        let run_id = store.begin_run(&profile_for(&origin)).unwrap();
+        let mut crawl = crawler(&origin, limits);
+        crawl.persist_on(store.clone(), run_id);
+        let report = crawl.run().await;
+        assert!(report.completed, "{report:?}");
+        let home = report
+            .observations
+            .iter()
+            .find(|obs| obs.identity.ends_with('/'))
+            .expect("homepage observation");
+        assert_eq!(home.page.titles, ["Home"]);
+        assert!(home.page.is_complete(), "{home:?}");
+        assert_eq!(home.links[0].href, "/big");
+        assert_eq!(home.links[0].host_owner, HostOwner::SameHost);
+        assert_eq!(home.resources[0].href, "/l.png");
+        assert_eq!(home.resources[0].host_owner, HostOwner::SameHost);
+        let big = report
+            .observations
+            .iter()
+            .find(|obs| obs.identity.contains("/big"))
+            .expect("truncated observation");
+        assert!(big.page.flags.truncated);
+        assert!(!big.page.is_complete());
+        let loaded = store.load_run(run_id).unwrap();
+        assert_eq!(loaded.observations.len(), report.observations.len());
+        assert!(
+            loaded
+                .observations
+                .iter()
+                .any(|obs| !obs.page.is_complete())
+        );
         cleanup_db(&path);
     }
 
