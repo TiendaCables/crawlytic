@@ -1,5 +1,6 @@
 mod auth;
 mod catalogue;
+mod crawl;
 mod profile;
 mod robots;
 mod scope;
@@ -14,6 +15,7 @@ pub use catalogue::{
     Severity, Stage, StateInput, checker_supported, current_findings, expected_fixture_state,
     new_issues_examples, resolve_state, rule_by_id, rules,
 };
+pub use crawl::{CancelHandle, CrawlLimits, CrawlReport, Crawler, UrlRecord, UrlState};
 pub use profile::{
     CrawlDelay, DiscoveryMode, IgnoredParameterMode, Profile, ProfileRole, SCHEMA_VERSION,
     ScheduleCadence, Weekday,
