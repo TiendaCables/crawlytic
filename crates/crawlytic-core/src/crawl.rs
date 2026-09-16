@@ -43,6 +43,36 @@ pub const REASON_SITEMAP_PARSE: &str = "Sitemap parse error";
 pub const REASON_SITEMAP_INACCESSIBLE: &str = "Sitemap inaccessible";
 pub const REASON_SITEMAP_FILE_CAP: &str = "Sitemap file cap";
 
+pub(crate) trait CrawlObserver: Send + Sync {
+    fn on_records(&self, records: &BTreeMap<String, UrlRecord>, latest: Option<&UrlRecord>);
+    fn on_diagnostic(&self, persist: bool, message: &str);
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct CrawlNotify {
+    inner: Option<Arc<dyn CrawlObserver>>,
+}
+
+impl CrawlNotify {
+    pub(crate) fn new(observer: Arc<dyn CrawlObserver>) -> Self {
+        Self {
+            inner: Some(observer),
+        }
+    }
+
+    fn records(&self, records: &BTreeMap<String, UrlRecord>, latest: Option<&UrlRecord>) {
+        if let Some(inner) = &self.inner {
+            inner.on_records(records, latest);
+        }
+    }
+
+    fn diagnostic(&self, persist: bool, message: &str) {
+        if let Some(inner) = &self.inner {
+            inner.on_diagnostic(persist, message);
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct CancelHandle {
     cancelled: Arc<AtomicBool>,
@@ -245,6 +275,7 @@ pub struct Crawler {
     persist: Option<PersistSession>,
     sitemap: SitemapInventory,
     sitemap_done: bool,
+    notify: CrawlNotify,
 }
 
 impl Crawler {
@@ -275,11 +306,16 @@ impl Crawler {
             persist: None,
             sitemap: SitemapInventory::default(),
             sitemap_done: false,
+            notify: CrawlNotify::default(),
         }
     }
 
     pub fn persist_on(&mut self, store: Store, run_id: i64) {
         self.persist = Some(PersistSession { store, run_id });
+    }
+
+    pub(crate) fn observe_with(&mut self, notify: CrawlNotify) {
+        self.notify = notify;
     }
 
     pub fn resume(
@@ -297,7 +333,6 @@ impl Crawler {
         Ok(crawler)
     }
 
-    #[cfg(test)]
     pub(crate) fn resume_with_transport(
         store: Store,
         run_id: i64,
@@ -333,7 +368,9 @@ impl Crawler {
                 enqueue_fetch: true,
             },
         );
-        self.records.get(&key).expect("inserted URL record")
+        let record = self.records.get(&key).expect("inserted URL record");
+        self.notify.records(&self.records, Some(record));
+        record
     }
 
     pub async fn run(&mut self) -> CrawlReport {
@@ -345,6 +382,8 @@ impl Crawler {
             Ok(file) => Some(file),
             Err(err) if err.is_auth_failure() => {
                 reclassify_queued(&mut self.records, UrlState::Failed, REASON_AUTH);
+                self.notify.diagnostic(false, REASON_AUTH);
+                self.notify.records(&self.records, None);
                 return report(
                     &self.records,
                     false,
@@ -375,6 +414,7 @@ impl Crawler {
                     enqueue_fetch: true,
                 },
             );
+            self.notify.records(&self.records, None);
         }
 
         let sitemap = if self.sitemap_done {
@@ -395,11 +435,14 @@ impl Crawler {
                 Ok(inventory) => {
                     self.sitemap_done = true;
                     self.sitemap = inventory.clone();
+                    self.notify.records(&self.records, None);
                     inventory
                 }
                 Err(inventory) => {
                     reclassify_queued(&mut self.records, UrlState::Failed, REASON_AUTH);
                     stamp_sitemap_provenance(&mut self.records, &inventory);
+                    self.notify.diagnostic(false, REASON_AUTH);
+                    self.notify.records(&self.records, None);
                     let persist_error = persist_checkpoint(
                         self.persist.as_ref(),
                         &self.records,
@@ -487,6 +530,7 @@ impl Crawler {
             auth_failed: false,
             persist: self.persist.clone(),
             persist_error: None,
+            notify: self.notify.clone(),
         }));
         let gate = Arc::new(tokio::sync::Mutex::new(None::<tokio::time::Instant>));
         let mut tasks = tokio::task::JoinSet::new();
@@ -619,6 +663,7 @@ struct RunState {
     auth_failed: bool,
     persist: Option<PersistSession>,
     persist_error: Option<String>,
+    notify: CrawlNotify,
 }
 
 struct PageOffer {
@@ -784,8 +829,8 @@ async fn set_record(
     } else {
         None
     };
-    if let (Some(session), Some(record)) = (shared.persist.clone(), snapshot) {
-        match session.store.upsert_url(session.run_id, &record) {
+    if let (Some(session), Some(record)) = (shared.persist.clone(), snapshot.as_ref()) {
+        match session.store.upsert_url(session.run_id, record) {
             Ok(()) => {
                 if matches!(
                     record.state,
@@ -798,6 +843,7 @@ async fn set_record(
             Err(err) => note_persist_error(&mut shared, err),
         }
     }
+    shared.notify.records(&shared.records, snapshot.as_ref());
 }
 
 fn reclassify_queued(records: &mut BTreeMap<String, UrlRecord>, state: UrlState, reason: &str) {
@@ -935,6 +981,7 @@ fn note_persist_error(state: &mut RunState, err: StoreError) {
         });
     }
     state.persist_error = Some(err.to_string());
+    state.notify.diagnostic(true, &err.to_string());
 }
 
 async fn persist_frontier(shared: &tokio::sync::Mutex<RunState>) {
@@ -1091,6 +1138,7 @@ async fn discover_html_links(
             );
         }
     }
+    state.notify.records(&state.records, None);
     if let Some(session) = state.persist.clone() {
         let persisted = (|| -> Result<(), StoreError> {
             for record in state.records.values() {
@@ -2576,5 +2624,170 @@ lists_complete = false
         assert!(!settings.contains("signature:"));
         assert_signed(&origin);
         cleanup_db(&path);
+    }
+
+    fn engine_for(origin: &TestOrigin, store: Store, limits: CrawlLimits) -> crate::engine::Engine {
+        use crate::engine::{Engine, EngineConfig};
+        let transport = SignedTransport::new_with_client(client(), origin.url(), &auth());
+        Engine::spawn_with_transport(
+            EngineConfig {
+                store,
+                auth: auth(),
+                limits,
+            },
+            transport,
+        )
+    }
+
+    async fn wait_for_status(
+        engine: &crate::engine::Engine,
+        want: crate::engine::SessionStatus,
+    ) -> crate::engine::ProgressSnapshot {
+        let timeout = tokio::time::sleep(Duration::from_secs(20));
+        tokio::pin!(timeout);
+        let mut progress = engine.progress();
+        loop {
+            if progress.borrow().status == want {
+                return progress.borrow().clone();
+            }
+            tokio::select! {
+                _ = &mut timeout => panic!(
+                    "timed out waiting for {want:?}, last {:?}",
+                    progress.borrow().status
+                ),
+                _ = progress.changed() => {}
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn headless_client_drives_and_observes_a_run() {
+        use crate::engine::{CrawlCommand, SessionStatus};
+
+        let origin = TestOrigin::https();
+        origin.allow_robots();
+        origin.on("/", 200, "text/html", "<html><a href=\"/a\">a</a></html>");
+        origin.on("/a", 200, "text/html", "<html>a</html>");
+        let path = temp_db();
+        let store = Store::open(&path).unwrap().with_batch_size(1);
+        let mut lim = limits();
+        lim.concurrency = 1;
+        let engine = engine_for(&origin, store.clone(), lim);
+        let profile = profile_for(&origin);
+        engine
+            .commands()
+            .try_send(CrawlCommand::Start {
+                profile: Box::new(profile),
+            })
+            .unwrap();
+        let snap = wait_for_status(&engine, SessionStatus::Completed).await;
+        assert_eq!(
+            snap.displayed_user_agent.as_str(),
+            "Crawlytic/0.1 (self-hosted SEO audit)"
+        );
+        assert!(
+            !snap
+                .displayed_user_agent
+                .as_str()
+                .to_ascii_lowercase()
+                .contains("viewport")
+        );
+        assert!(snap.counters.fetched >= 2);
+        assert_eq!(
+            snap.counters.discovered(),
+            snap.counters.fetched
+                + snap.counters.excluded
+                + snap.counters.blocked
+                + snap.counters.failed
+                + snap.counters.pending
+                + snap.counters.in_flight
+        );
+        let loaded = store.load_run(snap.run_id.expect("run id")).unwrap();
+        let persisted = crate::engine::CrawlCounters::from_records(&loaded.urls);
+        assert_eq!(persisted, snap.counters);
+        assert_eq!(persisted.discovered(), loaded.urls.len() as u64);
+        assert_signed(&origin);
+        cleanup_db(&path);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn slow_consumer_cannot_unbounded_grow_and_cancel_resume_work() {
+        use crate::engine::{CrawlCommand, SessionStatus};
+
+        let origin = TestOrigin::https();
+        origin.allow_robots();
+        let mut home = String::from("<html>");
+        for i in 0..40 {
+            home.push_str(&format!("<a href=\"/p{i}\">p</a>"));
+            origin.on(&format!("/p{i}"), 200, "text/html", "<html>p</html>");
+        }
+        home.push_str("</html>");
+        origin.on("/", 200, "text/html", &home);
+        let store = Store::open_in_memory().unwrap();
+        let mut lim = limits();
+        lim.concurrency = 1;
+        lim.max_urls = 64;
+        let mut engine = engine_for(&origin, store.clone(), lim);
+        engine
+            .commands()
+            .try_send(CrawlCommand::Start {
+                profile: Box::new(profile_for(&origin)),
+            })
+            .unwrap();
+        let snap = wait_for_status(&engine, SessionStatus::Completed).await;
+        assert!(
+            snap.dropped_events > 0,
+            "expected dropped events, got {}",
+            snap.dropped_events
+        );
+        let queued = {
+            let mut n = 0usize;
+            while engine.events().try_recv().is_ok() {
+                n += 1;
+            }
+            n
+        };
+        assert!(queued <= crate::engine::DISCRETE_EVENT_CAPACITY);
+        let loaded = store.load_run(snap.run_id.expect("run id")).unwrap();
+        assert_eq!(
+            crate::engine::CrawlCounters::from_records(&loaded.urls),
+            snap.counters
+        );
+        drop(engine);
+
+        let origin2 = TestOrigin::https();
+        origin2.allow_robots();
+        let release = origin2.stall("/");
+        let path2 = temp_db();
+        let store2 = Store::open(&path2).unwrap().with_batch_size(1);
+        let mut lim = limits();
+        lim.concurrency = 1;
+        let engine = engine_for(&origin2, store2.clone(), lim);
+        engine
+            .commands()
+            .try_send(CrawlCommand::Start {
+                profile: Box::new(profile_for(&origin2)),
+            })
+            .unwrap();
+        let running = wait_for_status(&engine, SessionStatus::Running).await;
+        engine.commands().try_send(CrawlCommand::Cancel).unwrap();
+        let incomplete = wait_for_status(&engine, SessionStatus::Incomplete).await;
+        assert_eq!(running.run_id, incomplete.run_id);
+        let _ = release.send(());
+        let run_id = incomplete.run_id.expect("run id");
+        drop(engine);
+
+        origin2.on("/", 200, "text/html", "<html>home</html>");
+        let store2 = Store::open(&path2).unwrap().with_batch_size(1);
+        let mut lim = limits();
+        lim.concurrency = 1;
+        let engine = engine_for(&origin2, store2.clone(), lim);
+        engine
+            .commands()
+            .try_send(CrawlCommand::Resume { run_id })
+            .unwrap();
+        let resumed = wait_for_status(&engine, SessionStatus::Completed).await;
+        assert_eq!(resumed.run_id, Some(run_id));
+        cleanup_db(&path2);
     }
 }
