@@ -26,12 +26,11 @@ sf-string, so a URI without quotes is wrapped as `"https://shopify.com"`.
 Copy `profile.example.toml` to `profile.local.toml` and launch with
 `cargo run -p crawlytic -- profile.local.toml` to customize the own-bot profile.
 `profile.comparison.toml` records the captured Semrush SiteAuditBot user-agent and
-the same incomplete scope lists for comparison only; do not use it to impersonate
+the same owner-supplied scope lists for comparison only; do not use it to impersonate
 Semrush. Wrap `.env` values in single quotes so embedded double quotes survive.
 
-Captured lists are partial: 12 of 27 ignored parameter names and a visible subset of
-excluded paths. Do not guess the rest or mark `lists_complete`. URLs that carry a
-listed parameter are skipped entirely; `ignored_parameter_mode = "strip"` is a
+Captured lists are complete: 27 ignored parameter names and 21 excluded paths.
+URLs that carry a listed parameter are skipped entirely; `ignored_parameter_mode = "strip"` is a
 separate explicit behaviour. Path entries without a trailing slash are string
 prefixes (`/shoes` matches `/shoes-men`); a trailing slash is that folder only.
 
@@ -66,7 +65,7 @@ simple challenge heuristic cannot detect every block page.
 Recorded TiendaCables settings: www.tiendacables.com; 20,000 page cap; 3,725-page
 historical observation (not an invariant); homepage-link discovery; JS off; crawl
 delay minimum (no numeric rate); weekly Monday intent; robots/meta bypass off;
-Web Bot Auth required; 12 of 27 ignored parameters captured.
+Web Bot Auth required; 27 ignored parameters and 21 excluded paths captured.
 
 ## Verification
 

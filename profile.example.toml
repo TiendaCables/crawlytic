@@ -1,7 +1,5 @@
 # Own-bot TiendaCables crawl profile (schema 1).
-# Known exclusions and ignored parameters are the visible subset only.
-# Do not guess the remaining 15 parameter names or extra paths.
-# Completing this list and claiming Semrush scope parity needs a full text export.
+# Owner-supplied full exclude paths and ignored parameters.
 # Secret values are not stored here; they are read from the named environment variables.
 
 schema_version = 1
@@ -37,6 +35,21 @@ exclude_paths = [
   "/en/collections/types",
   "/en/blogs/noticias/tagged/",
   "/search",
+  "/cart",
+  "/en/checkout",
+  "/en/cart",
+  "/pt/blogs/noticias/tagged/",
+  "/pt/cart",
+  "/account",
+  "/pt/search",
+  "/collections/types",
+  "/pt/account",
+  "/pt/collections/vendors",
+  "/pt/checkout",
+  "/pt/collections/types",
+  "/en/account",
+  "/checkout",
+  "/blogs/noticias/tagged/",
 ]
 
 # Skip the URL when any listed parameter is present. strip is a separate mode.
@@ -55,6 +68,21 @@ skip_parameters = [
   "variant",
   "tw_campaign",
   "fbclid",
+  "_psq",
+  "options_prefix",
+  "region_country",
+  "srsltid",
+  "mot_q",
+  "q",
+  "gclid",
+  "tw_adid",
+  "dfw_tracker",
+  "_v",
+  "gbraid",
+  "tw_source",
+  "_pos",
+  "page",
+  "_ss",
 ]
 
 # Weekly Monday intent only. Time and timezone are unspecified; no scheduler.
@@ -66,7 +94,7 @@ auth_signature_env = "CRAWL_SIGNATURE"
 auth_signature_input_env = "CRAWL_SIGNATURE_INPUT"
 auth_signature_agent_env = "CRAWL_SIGNATURE_AGENT"
 
-ignored_parameters_captured = 12
+ignored_parameters_captured = 27
 ignored_parameters_source_count = 27
-exclude_paths_complete = false
-lists_complete = false
+exclude_paths_complete = true
+lists_complete = true

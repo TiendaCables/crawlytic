@@ -365,6 +365,60 @@ mod tests {
 
     const SEMRUSH_UA: &str = "Mozilla/5.0 (iPhone; CPU iPhone OS 6_0 like Mac OS X) AppleWebKit/536.26 (KHTML, like Gecko) Version/6.0 Mobile/10A5376e Safari/8536.25 (compatible; SiteAuditBot/0.97; +http://www.semrush.com/bot.html)";
 
+    const COMPLETE_EXCLUDE_PATHS: &[&str] = &[
+        "/en/collections/vendors",
+        "/collections/vendors",
+        "/en/search",
+        "/en/collections/types",
+        "/en/blogs/noticias/tagged/",
+        "/search",
+        "/cart",
+        "/en/checkout",
+        "/en/cart",
+        "/pt/blogs/noticias/tagged/",
+        "/pt/cart",
+        "/account",
+        "/pt/search",
+        "/collections/types",
+        "/pt/account",
+        "/pt/collections/vendors",
+        "/pt/checkout",
+        "/pt/collections/types",
+        "/en/account",
+        "/checkout",
+        "/blogs/noticias/tagged/",
+    ];
+
+    const COMPLETE_SKIP_PARAMETERS: &[&str] = &[
+        "gad_source",
+        "buyer_flags",
+        "amp",
+        "options[prefix]",
+        "sort_by",
+        "type",
+        "gad_campaignid",
+        "mot_S",
+        "tw_kwdid",
+        "variant",
+        "tw_campaign",
+        "fbclid",
+        "_psq",
+        "options_prefix",
+        "region_country",
+        "srsltid",
+        "mot_q",
+        "q",
+        "gclid",
+        "tw_adid",
+        "dfw_tracker",
+        "_v",
+        "gbraid",
+        "tw_source",
+        "_pos",
+        "page",
+        "_ss",
+    ];
+
     fn url(path: &str) -> Url {
         Url::parse(&format!("https://www.tiendacables.com{path}")).unwrap()
     }
@@ -543,8 +597,8 @@ lists_complete = false
             include_str!("../../../profile.example.toml")
                 .to_owned()
                 .replace(
-                    "lists_complete = false",
-                    "lists_complete = false\nlimits_are_catalogue_size = true",
+                    "observed_pages_baseline = 3725",
+                    "observed_pages_baseline = 3725\nlimits_are_catalogue_size = true",
                 )
                 .as_str(),
         )
@@ -585,11 +639,11 @@ lists_complete = false
             comparison.ignored_parameter_mode,
             IgnoredParameterMode::Skip
         );
-        assert_eq!(own.ignored_parameters_captured, 12);
+        assert_eq!(own.ignored_parameters_captured, 27);
         assert_eq!(own.ignored_parameters_source_count, 27);
-        assert!(!own.lists_complete);
-        assert!(!own.exclude_paths_complete);
-        assert!(!comparison.lists_complete);
+        assert!(own.lists_complete);
+        assert!(own.exclude_paths_complete);
+        assert!(comparison.lists_complete);
         assert_eq!(own.discovery_mode, DiscoveryMode::HomepageInternalLinks);
         assert_eq!(own.crawl_delay, CrawlDelay::Minimum);
         assert!(comparison.summary().contains("do not impersonate Semrush"));
@@ -597,15 +651,89 @@ lists_complete = false
 
     #[test]
     fn incomplete_lists_cannot_be_marked_complete() {
-        let err = Profile::load(
-            include_str!("../../../profile.example.toml")
-                .to_owned()
-                .replace("lists_complete = false", "lists_complete = true")
-                .as_str(),
-        )
-        .unwrap_err()
-        .to_string();
+        let incomplete = r#"
+schema_version = 1
+role = "own_bot"
+start_url = "https://www.tiendacables.com/"
+max_pages = 20000
+observed_pages_baseline = 3725
+user_agent = "Crawlytic/0.1 (self-hosted SEO audit)"
+discovery_mode = "homepage_internal_links"
+crawl_delay = "minimum"
+javascript_rendering = false
+bypass_robots = false
+bypass_meta = false
+password_authentication = false
+web_bot_auth_required = true
+allow_subfolders = []
+exclude_paths = ["/search"]
+ignored_parameter_mode = "skip"
+parameter_names_case_sensitive = true
+skip_parameters = ["variant"]
+schedule_cadence = "weekly"
+schedule_weekday = "monday"
+completion_email = false
+auth_signature_env = "CRAWL_SIGNATURE"
+auth_signature_input_env = "CRAWL_SIGNATURE_INPUT"
+auth_signature_agent_env = "CRAWL_SIGNATURE_AGENT"
+ignored_parameters_captured = 1
+ignored_parameters_source_count = 27
+exclude_paths_complete = false
+lists_complete = true
+"#;
+        let err = Profile::load(incomplete).unwrap_err().to_string();
         assert!(err.contains("lists_complete"), "{err}");
+    }
+
+    #[test]
+    fn shipped_profiles_record_complete_owner_lists() {
+        for text in [
+            include_str!("../../../profile.example.toml"),
+            include_str!("../../../profile.comparison.toml"),
+        ] {
+            let profile = Profile::load(text).unwrap();
+            assert_eq!(
+                profile
+                    .exclude_paths
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                COMPLETE_EXCLUDE_PATHS
+            );
+            assert_eq!(
+                profile
+                    .skip_parameters
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                COMPLETE_SKIP_PARAMETERS
+            );
+            assert_eq!(profile.ignored_parameters_captured, 27);
+            assert_eq!(profile.ignored_parameters_source_count, 27);
+            assert!(profile.exclude_paths_complete);
+            assert!(profile.lists_complete);
+            assert!(profile.summary().contains("complete"));
+            assert_eq!(
+                profile.exclusion(&url("/checkout")),
+                Some("Excluded path prefix")
+            );
+            assert_eq!(
+                profile.exclusion(&url("/pt/account/orders")),
+                Some("Excluded path prefix")
+            );
+            assert_eq!(
+                profile.exclusion(&url("/blogs/noticias/tagged/oferta")),
+                Some("Excluded subfolder")
+            );
+            assert_eq!(
+                profile.exclusion(&url("/products/x?gclid=1")),
+                Some("Ignored parameter")
+            );
+            assert_eq!(
+                profile.exclusion(&url("/collections/x?page=2")),
+                Some("Ignored parameter")
+            );
+        }
     }
 
     #[test]
@@ -634,9 +762,9 @@ lists_complete = false
             p.exclusion(&Url::parse("https://www.tiendacables.com/products/x?variant=1").unwrap())
                 .is_some()
         );
-        assert!(
-            p.exclusion(&Url::parse("https://www.tiendacables.com/collections/x?page=2").unwrap())
-                .is_none()
+        assert_eq!(
+            p.exclusion(&Url::parse("https://www.tiendacables.com/collections/x?page=2").unwrap()),
+            Some("Ignored parameter")
         );
         assert!(
             p.exclusion(&Url::parse("https://www.tiendacables.com/search?q=x").unwrap())
