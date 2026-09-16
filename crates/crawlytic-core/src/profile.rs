@@ -16,6 +16,18 @@ pub enum ProfileRole {
 #[serde(rename_all = "snake_case")]
 pub enum DiscoveryMode {
     HomepageInternalLinks,
+    Sitemap,
+    Combined,
+}
+
+impl DiscoveryMode {
+    pub fn follows_website_links(self) -> bool {
+        matches!(self, Self::HomepageInternalLinks | Self::Combined)
+    }
+
+    pub fn enqueues_sitemap_urls(self) -> bool {
+        matches!(self, Self::Sitemap | Self::Combined)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -252,11 +264,12 @@ impl Profile {
             ),
         };
         format!(
-            "Store: {}\nRole: {role} | User-Agent: {}\nPage cap: {} (not catalogue size) | Observed baseline: {} (historical, not an invariant)\nDiscovery: homepage internal links | JavaScript rendering: {} | Crawl delay: minimum\nRobots bypass: {} | Meta bypass: {} | Web Bot Auth: {} | Password auth: {}\nSchedule intent: weekly {} ({schedule_when})\nExcluded paths: {} ({lists}) | Ignored parameters: {} of {} ({param_mode})\nSecrets: environment references only ({}, {}, {})",
+            "Store: {}\nRole: {role} | User-Agent: {}\nPage cap: {} (not catalogue size) | Observed baseline: {} (historical, not an invariant)\nDiscovery: {} | JavaScript rendering: {} | Crawl delay: minimum\nRobots bypass: {} | Meta bypass: {} | Web Bot Auth: {} | Password auth: {}\nSchedule intent: weekly {} ({schedule_when})\nExcluded paths: {} ({lists}) | Ignored parameters: {} of {} ({param_mode})\nSecrets: environment references only ({}, {}, {})",
             self.start_url,
             self.user_agent,
             self.max_pages,
             self.observed_pages_baseline,
+            discovery_label(self.discovery_mode),
             off_on(self.javascript_rendering),
             off_on(self.bypass_robots),
             off_on(self.bypass_meta),
@@ -274,6 +287,14 @@ impl Profile {
             self.auth_signature_input_env,
             self.auth_signature_agent_env,
         )
+    }
+}
+
+fn discovery_label(mode: DiscoveryMode) -> &'static str {
+    match mode {
+        DiscoveryMode::HomepageInternalLinks => "homepage internal links",
+        DiscoveryMode::Sitemap => "sitemap",
+        DiscoveryMode::Combined => "homepage internal links and sitemap",
     }
 }
 
