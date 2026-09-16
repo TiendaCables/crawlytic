@@ -1,5 +1,12 @@
+mod catalogue;
 mod profile;
 
+pub use catalogue::{
+    CATALOGUE_VERSION, CapturedCurrent, CoarseUnit, FIXTURE_CONTRACT_VERSION, FixtureKind,
+    HISTORICAL_BASELINE_DATE, InventoryUnit, NewIssuesExample, Rule, RuleState, RuleStatus,
+    Severity, Stage, StateInput, checker_supported, current_findings, expected_fixture_state,
+    new_issues_examples, resolve_state, rule_by_id, rules,
+};
 pub use profile::{
     CrawlDelay, DiscoveryMode, IgnoredParameterMode, Profile, ProfileRole, SCHEMA_VERSION,
     ScheduleCadence, Weekday,
