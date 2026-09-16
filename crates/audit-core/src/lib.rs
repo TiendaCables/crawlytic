@@ -1,57 +1,19 @@
+mod profile;
+
+pub use profile::{
+    CrawlDelay, DiscoveryMode, IgnoredParameterMode, Profile, ProfileRole, SCHEMA_VERSION,
+    ScheduleCadence, Weekday,
+};
+
 use anyhow::{Context, Result, bail, ensure};
 use reqwest::{
     Client,
     header::{HeaderMap, HeaderValue},
     redirect::Policy,
 };
-use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Duration;
-use url::Url;
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Profile {
-    pub start_url: Url,
-    pub max_pages: usize,
-    pub exclude_paths: Vec<String>,
-    pub skip_parameters: Vec<String>,
-    pub user_agent: String,
-}
-
-impl Profile {
-    pub fn load(text: &str) -> Result<Self> {
-        let p: Self = toml::from_str(text).context("Invalid profile TOML")?;
-        ensure!(
-            p.start_url.scheme() == "https" && p.start_url.host_str().is_some(),
-            "An HTTPS storefront URL is required"
-        );
-        ensure!(
-            p.start_url.username().is_empty() && p.start_url.password().is_none(),
-            "URL credentials are not supported"
-        );
-        ensure!(p.max_pages > 0, "Page limit must be positive");
-        HeaderValue::from_str(&p.user_agent).map_err(|_| anyhow::anyhow!("Invalid user agent"))?;
-        Ok(p)
-    }
-
-    pub fn exclusion(&self, url: &Url) -> Option<&'static str> {
-        if url.origin() != self.start_url.origin() {
-            return Some("Outside configured origin");
-        }
-        if self.exclude_paths.iter().any(|p| url.path().starts_with(p)) {
-            return Some("Excluded path prefix");
-        }
-        if url
-            .query_pairs()
-            .any(|(k, _)| self.skip_parameters.iter().any(|p| p == &k))
-        {
-            return Some("Ignored parameter");
-        }
-        None
-    }
-}
 
 // Intentionally neither Debug nor Serialize: never put credentials in snapshots or logs.
 pub struct WebBotAuth {
@@ -221,29 +183,6 @@ pub async fn preflight(profile: &Profile, auth: &WebBotAuth) -> Result<Probe> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn profile() -> Profile {
-        Profile::load(include_str!("../../../profile.example.toml")).unwrap()
-    }
-    #[test]
-    fn scope_and_parameters_are_explicit() {
-        let p = profile();
-        assert!(
-            p.exclusion(&Url::parse("https://evil.example/").unwrap())
-                .is_some()
-        );
-        assert!(
-            p.exclusion(&Url::parse("https://www.tiendacables.com/products/x?variant=1").unwrap())
-                .is_some()
-        );
-        assert!(
-            p.exclusion(&Url::parse("https://www.tiendacables.com/collections/x?page=2").unwrap())
-                .is_none()
-        );
-        assert!(
-            p.exclusion(&Url::parse("https://www.tiendacables.com/search?q=x").unwrap())
-                .is_some()
-        );
-    }
     #[test]
     fn secrets_are_sensitive_and_injection_is_rejected() {
         let auth = WebBotAuth::new("sig1=:example:", "sig1=()", "https://shopify.com").unwrap();
