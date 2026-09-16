@@ -1,5 +1,6 @@
 use crate::auth::{CRYPTO_VERIFICATION_LIMITATION, WebBotAuth};
 use crate::profile::Profile;
+use crate::robots::{RobotsFile, RobotsRunMetadata, UrlAccess};
 use anyhow::{Context, Result};
 use reqwest::{
     Client, StatusCode,
@@ -40,6 +41,8 @@ pub struct Probe {
     pub bytes_sampled: usize,
     pub samples: Vec<FetchRecord>,
     pub evidence_note: &'static str,
+    pub robots: RobotsRunMetadata,
+    pub start_url_access: UrlAccess,
 }
 
 #[derive(Debug)]
@@ -74,7 +77,7 @@ impl AccessError {
         }
     }
 
-    fn blocking_status(&self) -> bool {
+    pub(crate) fn blocking_status(&self) -> bool {
         self.blocking
     }
 }
@@ -126,6 +129,16 @@ impl SignedTransport {
         url: &Url,
         kind: ResourceKind,
     ) -> std::result::Result<FetchRecord, AccessError> {
+        self.fetch_with_body(url, kind)
+            .await
+            .map(|(record, _)| record)
+    }
+
+    pub(crate) async fn fetch_with_body(
+        &self,
+        url: &Url,
+        kind: ResourceKind,
+    ) -> std::result::Result<(FetchRecord, Vec<u8>), AccessError> {
         if self.auth.expired_now() {
             return Err(AccessError::with_cause(
                 "Web Bot Auth credentials are missing, malformed, or expired before the request was sent.",
@@ -167,21 +180,27 @@ impl SignedTransport {
             let sample = read_sample(response).await?;
             if kind == ResourceKind::Page {
                 ensure_html_page(&current, status, &content_type, &sample)?;
-            } else if !status.is_success() && status != StatusCode::NOT_FOUND {
+            } else if kind != ResourceKind::Robots
+                && !status.is_success()
+                && status != StatusCode::NOT_FOUND
+            {
                 return Err(AccessError::with_cause(
                     format!("HTTP {} from {current} for {:?}", status.as_u16(), kind),
                     "The origin returned a non-success status. This observation is not a signature verdict.",
                 ));
             }
-            return Ok(FetchRecord {
-                requested_url: url.clone(),
-                destination_url: current,
-                status: status.as_u16(),
-                content_type,
-                bytes_sampled: sample.len(),
-                resource_kind: kind,
-                credentials_attached: true,
-            });
+            return Ok((
+                FetchRecord {
+                    requested_url: url.clone(),
+                    destination_url: current,
+                    status: status.as_u16(),
+                    content_type,
+                    bytes_sampled: sample.len(),
+                    resource_kind: kind,
+                    credentials_attached: true,
+                },
+                sample,
+            ));
         }
     }
 
@@ -189,26 +208,49 @@ impl SignedTransport {
         &self,
         profile: &Profile,
     ) -> std::result::Result<Probe, AccessError> {
-        let page = self.fetch(&profile.start_url, ResourceKind::Page).await?;
-        let mut samples = vec![page];
-        for (path, kind) in [
-            ("/robots.txt", ResourceKind::Robots),
-            ("/sitemap.xml", ResourceKind::Sitemap),
-        ] {
-            let url = origin_path(&profile.start_url, path);
-            match self.fetch(&url, kind).await {
+        let robots_url = origin_path(&profile.start_url, "/robots.txt");
+        let (robots_record, file) = match self
+            .fetch_with_body(&robots_url, ResourceKind::Robots)
+            .await
+        {
+            Ok((record, body)) => {
+                let file = RobotsFile::from_fetch(&record, &body);
+                (Some(record), file)
+            }
+            Err(err) if err.blocking_status() => return Err(err),
+            Err(err) => (None, RobotsFile::unavailable(err.observation())),
+        };
+        let start_url_access = file.decide(profile, &profile.start_url);
+        let robots = file.metadata(profile, &profile.start_url);
+        let mut samples = Vec::new();
+        if let UrlAccess::Allowed { .. } = &start_url_access {
+            samples.push(self.fetch(&profile.start_url, ResourceKind::Page).await?);
+        }
+        if let Some(record) = robots_record {
+            samples.push(record);
+        }
+        let sitemap_url = origin_path(&profile.start_url, "/sitemap.xml");
+        if matches!(
+            file.decide(profile, &sitemap_url),
+            UrlAccess::Allowed { .. }
+        ) {
+            match self.fetch(&sitemap_url, ResourceKind::Sitemap).await {
                 Ok(record) => samples.push(record),
                 Err(err) if err.blocking_status() => return Err(err),
                 Err(_) => {}
             }
         }
-        let page = &samples[0];
+        let page = samples
+            .iter()
+            .find(|s| s.resource_kind == ResourceKind::Page);
         Ok(Probe {
-            status: page.status,
-            content_type: page.content_type.clone(),
-            bytes_sampled: page.bytes_sampled,
+            status: page.map(|s| s.status).unwrap_or(0),
+            content_type: page.map(|s| s.content_type.clone()).unwrap_or_default(),
+            bytes_sampled: page.map(|s| s.bytes_sampled).unwrap_or(0),
             samples,
             evidence_note: CRYPTO_VERIFICATION_LIMITATION,
+            robots,
+            start_url_access,
         })
     }
 
@@ -961,9 +1003,110 @@ lists_complete = false
         );
         assert!(!format!("{probe:?}").contains("TESTSIGNATUREVALUE"));
         assert!(CREDENTIAL_REPLACEMENT_PLAN.contains("Do not store secrets"));
+        assert!(!probe.robots.bypass_robots);
+        assert!(matches!(probe.start_url_access, UrlAccess::Allowed { .. }));
         for req in origin.recorded() {
             assert_signed(&req);
         }
+    }
+
+    #[tokio::test]
+    async fn robots_denial_does_not_fetch_the_page_or_look_like_a_broken_page() {
+        let origin = TestOrigin::https();
+        origin.on("/", 200, "text/html", "<html>secret</html>");
+        origin.on(
+            "/robots.txt",
+            200,
+            "text/plain",
+            "User-agent: *\nDisallow: /\n",
+        );
+        origin.on("/sitemap.xml", 200, "application/xml", "<urlset></urlset>");
+        let profile = profile_for(&origin);
+        let probe = transport(&origin).sample_access(&profile).await.unwrap();
+        assert!(matches!(
+            probe.start_url_access,
+            UrlAccess::Blocked(ref evidence)
+                if evidence.kind == crate::robots::BlockKind::RobotsTxt
+                    && evidence.note.contains("not a broken page")
+        ));
+        assert_eq!(probe.status, 0);
+        assert!(
+            !probe
+                .samples
+                .iter()
+                .any(|s| s.resource_kind == ResourceKind::Page)
+        );
+        assert!(
+            probe
+                .samples
+                .iter()
+                .any(|s| s.resource_kind == ResourceKind::Robots)
+        );
+        let paths: Vec<_> = origin.recorded().iter().map(|r| r.path.clone()).collect();
+        assert!(paths.contains(&"/robots.txt".into()), "{paths:?}");
+        assert!(
+            !paths.iter().any(|p| p == "/"),
+            "page must not be fetched: {paths:?}"
+        );
+        assert!(!paths.iter().any(|p| p == "/sitemap.xml"), "{paths:?}");
+        for req in origin.recorded() {
+            assert_signed(&req);
+        }
+    }
+
+    #[tokio::test]
+    async fn owner_robots_bypass_is_retained_and_still_signs() {
+        let origin = TestOrigin::https();
+        origin.on("/", 200, "text/html", "<html>override</html>");
+        origin.on(
+            "/robots.txt",
+            200,
+            "text/plain",
+            "User-agent: *\nDisallow: /\n",
+        );
+        origin.on("/sitemap.xml", 404, "text/plain", "missing");
+        let mut profile = profile_for(&origin);
+        profile.bypass_robots = true;
+        let probe = transport(&origin).sample_access(&profile).await.unwrap();
+        assert!(probe.robots.bypass_robots);
+        assert!(!probe.robots.bypass_meta);
+        assert!(matches!(
+            probe.start_url_access,
+            UrlAccess::Allowed {
+                reason: crate::robots::AllowReason::OwnerAuditBypass { .. }
+            }
+        ));
+        assert_eq!(probe.status, 200);
+        assert!(
+            probe
+                .samples
+                .iter()
+                .any(|s| s.resource_kind == ResourceKind::Page)
+        );
+        for req in origin.recorded() {
+            assert_signed(&req);
+        }
+    }
+
+    #[tokio::test]
+    async fn unavailable_robots_allows_fetch_without_calling_it_a_denial() {
+        let origin = TestOrigin::https();
+        origin.on("/", 200, "text/html", "<html>up</html>");
+        origin.on("/robots.txt", 500, "text/plain", "nope");
+        origin.on("/sitemap.xml", 200, "application/xml", "<urlset></urlset>");
+        let profile = profile_for(&origin);
+        let probe = transport(&origin).sample_access(&profile).await.unwrap();
+        assert!(matches!(
+            probe.start_url_access,
+            UrlAccess::Allowed {
+                reason: crate::robots::AllowReason::RobotsUnavailable
+            }
+        ));
+        assert_eq!(probe.status, 200);
+        assert!(matches!(
+            probe.robots.fetch,
+            crate::robots::RobotsFetchState::Unavailable { .. }
+        ));
     }
 
     #[tokio::test]

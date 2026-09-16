@@ -1,6 +1,7 @@
 mod auth;
 mod catalogue;
 mod profile;
+mod robots;
 mod transport;
 
 pub use auth::{
@@ -15,6 +16,10 @@ pub use catalogue::{
 pub use profile::{
     CrawlDelay, DiscoveryMode, IgnoredParameterMode, Profile, ProfileRole, SCHEMA_VERSION,
     ScheduleCadence, Weekday,
+};
+pub use robots::{
+    AllowReason, BlockKind, BlockedEvidence, RobotsCache, RobotsFetchState, RobotsFile,
+    RobotsRunMetadata, UrlAccess, evaluate_url, product_token,
 };
 pub use transport::{AccessError, FetchRecord, Probe, ResourceKind, SignedTransport, preflight};
 
