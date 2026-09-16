@@ -14,7 +14,7 @@ max_pages = 20000
 observed_pages_baseline = 3725
 
 # Independently identified client. Do not impersonate Semrush.
-user_agent = "TiendaCablesAudit/0.1 (self-hosted SEO audit)"
+user_agent = "Crawlytic/0.1 (self-hosted SEO audit)"
 
 discovery_mode = "homepage_internal_links"
 # Semrush showed "minimum"; no numeric rate was exposed.

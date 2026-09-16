@@ -1,13 +1,13 @@
-# Crawl TUI — working title
+# Crawlytic
 
-An initial Ratatui shell for a self-hosted technical SEO auditor. The name is provisional.
+A self-hosted technical SEO auditor with a Ratatui interface.
 
 ## Run
 
 Install a current stable Rust toolchain. From this directory:
 
 ```sh
-cargo run -p audit-tui
+cargo run -p crawlytic
 ```
 
 The interface starts without credentials. Copy `.env.example` to `.env` and fill in
@@ -24,7 +24,7 @@ in this slice; configure the final host. Auth errors never trigger unsigned fall
 sf-string, so a URI without quotes is wrapped as `"https://shopify.com"`.
 
 Copy `profile.example.toml` to `profile.local.toml` and launch with
-`cargo run -p audit-tui -- profile.local.toml` to customize the own-bot profile.
+`cargo run -p crawlytic -- profile.local.toml` to customize the own-bot profile.
 `profile.comparison.toml` records the captured Semrush SiteAuditBot user-agent and
 the same incomplete scope lists for comparison only; do not use it to impersonate
 Semrush. Wrap `.env` values in single quotes so embedded double quotes survive.
@@ -37,8 +37,8 @@ prefixes (`/shoes` matches `/shoes-men`); a trailing slash is that folder only.
 
 ## Boundaries
 
-- `audit-core`: profile, URL scope and Web Bot Auth transport; no terminal dependency.
-- `audit-tui`: Ratatui rendering, key input and background-task coordination.
+- `crawlytic-core`: profile, URL scope and Web Bot Auth transport; no terminal dependency.
+- `crawlytic`: Ratatui rendering, key input and background-task coordination.
 - Future interfaces can use the core without depending on Ratatui.
 
 Implemented: versioned TOML profiles (own-bot and comparison), prefix vs subfolder
@@ -83,7 +83,7 @@ Terminal smoke test on Arch Linux (interactive; `q` / Esc / Ctrl-C to quit).
 The TUI starts without sending requests. Press `p` only when you intend a live probe.
 
 ```sh
-cargo run -p audit-tui
+cargo run -p crawlytic
 ```
 
 A user-reported successful `p` probe is operator evidence only. It is not recorded in

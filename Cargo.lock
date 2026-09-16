@@ -48,29 +48,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
-name = "audit-core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "dotenvy",
- "reqwest",
- "serde",
- "toml",
- "url",
-]
-
-[[package]]
-name = "audit-tui"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "audit-core",
- "crossterm",
- "ratatui",
- "tokio",
-]
-
-[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -289,6 +266,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5ca28b0ae3115b884660db4118d803791fd6756b6e88f39c0f3f7859060d7566"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "crawlytic"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "crawlytic-core",
+ "crossterm",
+ "ratatui",
+ "tokio",
+]
+
+[[package]]
+name = "crawlytic-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dotenvy",
+ "reqwest",
+ "serde",
+ "toml",
+ "url",
 ]
 
 [[package]]

@@ -1,5 +1,5 @@
 use anyhow::Result;
-use audit_core::{Profile, WebBotAuth, load_dotenv, preflight};
+use crawlytic_core::{Profile, WebBotAuth, load_dotenv, preflight};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{
     layout::{Constraint, Layout},
@@ -28,7 +28,7 @@ fn main() -> Result<()> {
                 let [header, config, auth, footer] = Layout::vertical([
                     Constraint::Length(3), Constraint::Min(8), Constraint::Min(5), Constraint::Length(3)
                 ]).areas(f.area());
-                f.render_widget(Paragraph::new("CRAWL / terminal audit prototype").style(Style::default().fg(Color::Cyan)).block(Block::bordered()), header);
+                f.render_widget(Paragraph::new("Crawlytic").style(Style::default().fg(Color::Cyan)).block(Block::bordered()), header);
                 f.render_widget(Paragraph::new(format!("{}\nCurrent capability: connection preflight only.", profile.summary())).wrap(Wrap { trim: false }).block(Block::bordered().title(" Crawl profile ")), config);
                 f.render_widget(Paragraph::new(format!("Web Bot Auth: required\nCredentials: CRAWL_SIGNATURE, CRAWL_SIGNATURE_INPUT, CRAWL_SIGNATURE_AGENT (.env or environment)\n\n{message}")).wrap(Wrap { trim: false }).block(Block::bordered().title(" Shopify access ")), auth);
                 f.render_widget(Paragraph::new("p  Test connection     q / Esc / Ctrl-C  Quit").block(Block::bordered()), footer);

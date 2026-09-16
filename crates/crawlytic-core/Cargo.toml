@@ -1,5 +1,5 @@
 [package]
-name = "audit-core"
+name = "crawlytic-core"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
