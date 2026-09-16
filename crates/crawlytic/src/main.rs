@@ -1,5 +1,5 @@
 use anyhow::Result;
-use crawlytic_core::{Profile, WebBotAuth, load_dotenv, preflight};
+use crawlytic_core::{CRYPTO_VERIFICATION_LIMITATION, Profile, WebBotAuth, load_dotenv, preflight};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{
     layout::{Constraint, Layout},
@@ -44,21 +44,44 @@ fn main() -> Result<()> {
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         break;
                     }
-                    KeyCode::Char('p') if task.is_none() => match WebBotAuth::from_env() {
-                        Err(e) => message = e.to_string(),
-                        Ok(auth) => {
-                            message = "Checking signed storefront access…".into();
-                            let p = profile.clone();
-                            let tx = tx.clone();
-                            task = Some(runtime.spawn(async move {
+                    KeyCode::Char('p') if task.is_none() => {
+                        match WebBotAuth::from_profile(&profile) {
+                            Err(e) => message = e.to_string(),
+                            Ok(auth) => {
+                                message = "Checking signed storefront access…".into();
+                                let p = profile.clone();
+                                let tx = tx.clone();
+                                task = Some(runtime.spawn(async move {
                                     let text = match preflight(&p, &auth).await {
-                                        Ok(r) => format!("HTTP {} | {} | {} bytes sampled.\nHTML reachable with headers attached. This does not prove signature acceptance or full crawl access.", r.status, r.content_type, r.bytes_sampled),
+                                        Ok(r) => {
+                                            let samples = r
+                                                .samples
+                                                .iter()
+                                                .map(|s| {
+                                                    format!(
+                                                        "{:?} {} {}",
+                                                        s.resource_kind,
+                                                        s.status,
+                                                        s.destination_url
+                                                    )
+                                                })
+                                                .collect::<Vec<_>>()
+                                                .join("; ");
+                                            format!(
+                                                "HTTP {} | {} | {} bytes sampled.\n{samples}\n{}",
+                                                r.status,
+                                                r.content_type,
+                                                r.bytes_sampled,
+                                                CRYPTO_VERIFICATION_LIMITATION
+                                            )
+                                        }
                                         Err(e) => e.to_string(),
                                     };
                                     let _ = tx.send(text);
                                 }));
+                            }
                         }
-                    },
+                    }
                     _ => {}
                 }
             }

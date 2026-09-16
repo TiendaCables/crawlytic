@@ -17,11 +17,16 @@ are stripped; exported environment variables override file values. Missing or in
 credentials produce errors that do not echo secret material. Avoid putting literal
 credentials in shell history.
 
-Press `p` for a signed HTTPS probe, `q`/Escape/Ctrl-C to quit. Network work runs off
-the UI thread. No requests occur automatically. Redirects are deliberately refused
-in this slice; configure the final host. Auth errors never trigger unsigned fallback.
-`CRAWL_SIGNATURE_AGENT` is sent as the `Signature-Agent` header. Shopify requires an
-sf-string, so a URI without quotes is wrapped as `"https://shopify.com"`.
+Press `p` for a bounded signed sample (start URL, `/robots.txt`, `/sitemap.xml`),
+`q`/Escape/Ctrl-C to quit. Network work runs off the UI thread. No requests occur
+automatically. Signature, Signature-Input and Signature-Agent are attached only to
+the profile's HTTPS origin. Same-origin HTTPS redirects keep the headers; other
+origins and HTTP downgrades are refused and never receive credentials. Missing,
+malformed or expired credentials fail before a request is sent. There is no unsigned
+fallback. `CRAWL_SIGNATURE_AGENT` is sent as the `Signature-Agent` header. Shopify
+requires an sf-string, so a URI without quotes is wrapped as `"https://shopify.com"`.
+`expires` in Signature-Input is treated as local expiry metadata; replace values in
+`.env` or the process environment, never in profiles.
 
 Copy `profile.example.toml` to `profile.local.toml` and launch with
 `cargo run -p crawlytic -- profile.local.toml` to customize the own-bot profile.
@@ -41,30 +46,32 @@ prefixes (`/shoes` matches `/shoes-men`); a trailing slash is that folder only.
 - Future interfaces can use the core without depending on Ratatui.
 
 Implemented: versioned TOML profiles (own-bot and comparison), prefix vs subfolder
-exclusions, skip-vs-strip query policy, credential validation, sensitive headers,
-bounded HTML preflight, responsive terminal status, versioned rule catalogue v1
-(97 transcribed checks plus limited AMP remainder, fixture contract, six result
-states). Checkers are not shipped; live evaluation is `unsupported` until owner
-issues land. Current 14 September 2026 findings are stored separately from the
-historical "new issues" column. No-count rows are not failures.
+exclusions, skip-vs-strip query policy, Web Bot Auth transport with origin-locked
+headers, same-origin HTTPS redirects, one connection retry, Signature-Input expiry
+metadata, 401/403/429 diagnostics that separate observation from suspected cause,
+HTTP/TLS fixtures for header destinations, bounded signed sample of page/robots/
+sitemap, responsive terminal status, versioned rule catalogue v1 (97 transcribed
+checks plus limited AMP remainder, fixture contract, six result states). Checkers
+are not shipped; live evaluation is `unsupported` until owner issues land. Current
+14 September 2026 findings are stored separately from the historical "new issues"
+column. No-count rows are not failures.
 
 Not implemented: crawl queue, robots evaluation, sitemap ingestion, rule checkers,
 SQLite history, scheduling, credential editing/storage, mobile rendering or JS.
 The page cap (20,000) and historical 3,725-page observation are not catalogue size.
 Weekly Monday is recorded without a time, timezone, or scheduler.
-The explicit connection probe only requests the configured start URL.
-A successful probe is not evidence that Shopify verified the signature, and the
-simple challenge heuristic cannot detect every block page.
+A successful sample is not evidence that Shopify verified the signature, and the
+simple challenge heuristic cannot detect every block page. Robots bypass remains off
+and is independent of authentication.
 
 ## Next milestones
 
-1. Auth transport integration tests against controlled fixtures; signed requests on
-   the selected origin only, including redirect handling and expiry diagnostics.
-2. Bounded queue, robots, backoff, cancellation, discovery and per-URL reasons.
-   Preserve skipped links for coverage without fetching excluded URLs.
-3. SQLite runs and homepage-based link depth; sitemaps as separate discovery evidence.
-4. Metadata/link/canonical checks with evidence; then the broader Semrush catalogue.
-5. History, scheduled headless runs and exports. A web UI can follow independently.
+1. Robots policy as a separate layer on this transport; bounded queue, backoff,
+   cancellation, discovery and per-URL reasons. Preserve skipped links for coverage
+   without fetching excluded URLs.
+2. SQLite runs and homepage-based link depth; sitemaps as separate discovery evidence.
+3. Metadata/link/canonical checks with evidence; then the broader Semrush catalogue.
+4. History, scheduled headless runs and exports. A web UI can follow independently.
 
 Recorded TiendaCables settings: www.tiendacables.com; 20,000 page cap; 3,725-page
 historical observation (not an invariant); homepage-link discovery; JS off; crawl
@@ -89,10 +96,17 @@ The TUI starts without sending requests. Press `p` only when you intend a live p
 cargo run -p crawlytic
 ```
 
-A user-reported successful `p` probe is operator evidence only. It is not recorded in
-this repository, is not covered by `cargo test`, and is not proof that Shopify accepted
-the signature or that a crawl is ready. Do not commit `.env`, `profile.local.toml`,
-SQLite files, or probe transcripts.
+Controlled HTTP/TLS fixtures in `cargo test` assert which destination receives each
+Web Bot Auth header, including same-origin redirects, refused cross-origin and HTTP
+downgrades, retries, 401/403/429 diagnostics and secret redaction. They do not contact
+the storefront.
+
+A user-reported or local `p` sample is operator evidence only. It is not recorded in
+this repository, is not covered by the default `cargo test` run, and is not proof that
+Shopify accepted the signature or that a crawl is ready. Optional
+`cargo test -p crawlytic-core live_tiendacables -- --ignored` contacts the live origin
+when credentials are already in the execution environment. Do not commit `.env`,
+`profile.local.toml`, SQLite files, or probe transcripts.
 
 References: https://ratatui.rs/ and
 https://help.shopify.com/en/manual/promoting-marketing/seo/crawling-your-store

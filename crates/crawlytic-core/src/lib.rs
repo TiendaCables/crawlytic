@@ -1,6 +1,11 @@
+mod auth;
 mod catalogue;
 mod profile;
+mod transport;
 
+pub use auth::{
+    CREDENTIAL_REPLACEMENT_PLAN, CRYPTO_VERIFICATION_LIMITATION, SignatureMetadata, WebBotAuth,
+};
 pub use catalogue::{
     CATALOGUE_VERSION, CapturedCurrent, CoarseUnit, FIXTURE_CONTRACT_VERSION, FixtureKind,
     HISTORICAL_BASELINE_DATE, InventoryUnit, NewIssuesExample, Rule, RuleState, RuleStatus,
@@ -11,65 +16,11 @@ pub use profile::{
     CrawlDelay, DiscoveryMode, IgnoredParameterMode, Profile, ProfileRole, SCHEMA_VERSION,
     ScheduleCadence, Weekday,
 };
+pub use transport::{AccessError, FetchRecord, Probe, ResourceKind, SignedTransport, preflight};
 
-use anyhow::{Context, Result, bail, ensure};
-use reqwest::{
-    Client,
-    header::{HeaderMap, HeaderValue},
-    redirect::Policy,
-};
+use anyhow::Result;
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::time::Duration;
-
-// Intentionally neither Debug nor Serialize: never put credentials in snapshots or logs.
-pub struct WebBotAuth {
-    headers: HeaderMap,
-}
-
-impl WebBotAuth {
-    pub fn new(signature: &str, input: &str, agent: &str) -> Result<Self> {
-        ensure!(
-            !agent.trim().is_empty(),
-            "Web Bot Auth fields must not be empty"
-        );
-        let agent = Self::signature_agent_header(agent);
-        let mut headers = HeaderMap::new();
-        for (name, text) in [
-            ("signature", signature),
-            ("signature-input", input),
-            ("signature-agent", agent.as_str()),
-        ] {
-            ensure!(
-                !text.trim().is_empty(),
-                "Web Bot Auth fields must not be empty"
-            );
-            let mut value = HeaderValue::from_str(text)
-                .map_err(|_| anyhow::anyhow!("Invalid Web Bot Auth header value"))?;
-            value.set_sensitive(true);
-            headers.insert(name, value);
-        }
-        Ok(Self { headers })
-    }
-
-    fn signature_agent_header(agent: &str) -> String {
-        let agent = agent.trim();
-        if agent.starts_with('"') && agent.ends_with('"') && agent.len() >= 2 {
-            agent.to_owned()
-        } else {
-            format!("\"{agent}\"")
-        }
-    }
-
-    pub fn from_env() -> Result<Self> {
-        let read = |key| std::env::var(key).map_err(|_| anyhow::anyhow!("Missing {key}"));
-        Self::new(
-            &read("CRAWL_SIGNATURE")?,
-            &read("CRAWL_SIGNATURE_INPUT")?,
-            &read("CRAWL_SIGNATURE_AGENT")?,
-        )
-    }
-}
 
 fn dotenv_error(err: dotenvy::Error) -> anyhow::Error {
     match err {
@@ -114,109 +65,9 @@ pub fn load_dotenv() -> Result<()> {
     }
 }
 
-#[derive(Debug)]
-pub struct Probe {
-    pub status: u16,
-    pub content_type: String,
-    pub bytes_sampled: usize,
-}
-
-/// A bounded signed HTTP probe. Redirects are refused, including to other hosts.
-/// A 200 HTML response is reachability evidence, not proof Shopify accepted auth.
-pub async fn preflight(profile: &Profile, auth: &WebBotAuth) -> Result<Probe> {
-    let client = Client::builder()
-        .redirect(Policy::none())
-        .timeout(Duration::from_secs(20))
-        .user_agent(&profile.user_agent)
-        .build()
-        .context("Cannot create HTTP client")?;
-    let mut response = client
-        .get(profile.start_url.clone())
-        .headers(auth.headers.clone())
-        .send()
-        .await
-        .map_err(|_| anyhow::anyhow!("Connection failed: check DNS, TLS and network access"))?;
-    let status = response.status();
-    if status.is_redirection() {
-        bail!("Redirect received; configure the final HTTPS host. Auth was not forwarded.");
-    }
-    if status.as_u16() == 401 || status.as_u16() == 403 {
-        bail!(
-            "Access denied. Check signature, expiry and domain; other access controls may also apply."
-        );
-    }
-    if status.as_u16() == 429 {
-        bail!("Rate limited. Check signature and retry later at a lower rate.");
-    }
-    ensure!(
-        status.is_success(),
-        "Storefront returned HTTP {}",
-        status.as_u16()
-    );
-    let content_type = response
-        .headers()
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_owned();
-    ensure!(
-        content_type.contains("text/html"),
-        "Expected an HTML storefront response"
-    );
-    let mut sample = Vec::new();
-    while sample.len() < 65536 {
-        let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(|_| anyhow::anyhow!("Failed reading response"))?
-        else {
-            break;
-        };
-        let take = chunk.len().min(65536 - sample.len());
-        sample.extend_from_slice(&chunk[..take]);
-    }
-    let lower = String::from_utf8_lossy(&sample).to_lowercase();
-    ensure!(
-        !lower.contains("cf-chl-") && !lower.contains("<title>just a moment"),
-        "Possible challenge page; storefront access is not verified"
-    );
-    Ok(Probe {
-        status: status.as_u16(),
-        content_type,
-        bytes_sampled: sample.len(),
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn secrets_are_sensitive_and_injection_is_rejected() {
-        let auth = WebBotAuth::new("sig1=:example:", "sig1=()", "https://shopify.com").unwrap();
-        assert!(auth.headers.values().all(HeaderValue::is_sensitive));
-        assert_eq!(
-            auth.headers
-                .get("signature-agent")
-                .unwrap()
-                .to_str()
-                .unwrap(),
-            "\"https://shopify.com\""
-        );
-        let quoted =
-            WebBotAuth::new("sig1=:example:", "sig1=()", "\"https://example.com/bot\"").unwrap();
-        assert_eq!(
-            quoted
-                .headers
-                .get("signature-agent")
-                .unwrap()
-                .to_str()
-                .unwrap(),
-            "\"https://example.com/bot\""
-        );
-        assert!(WebBotAuth::new("bad\r\nInjected: yes", "input", "agent").is_err());
-        assert!(WebBotAuth::new("", "input", "agent").is_err());
-        assert!(WebBotAuth::new("sig", "input", "   ").is_err());
-    }
 
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -294,7 +145,8 @@ CRAWL_SIGNATURE_INPUT="sig1=(\"@authority\" \"@path\");keyid=\"abc\""
         for (key, value) in previous {
             restore_var(key, value);
         }
-        assert_eq!(missing, "Missing CRAWL_SIGNATURE");
+        assert!(missing.starts_with("Missing CRAWL_SIGNATURE"), "{missing}");
+        assert!(missing.contains(CREDENTIAL_REPLACEMENT_PLAN), "{missing}");
 
         let secret = "super-secret-token-value";
         let invalid = match WebBotAuth::new(&format!("{secret}\r\nInjected: 1"), "input", "agent") {
