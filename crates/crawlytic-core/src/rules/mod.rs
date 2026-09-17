@@ -1,12 +1,13 @@
 //! Inventory checkers over stored observations.
 //!
-//! HTML metadata (TC-458), link/URL-shape (TC-459) and canonical/indexability
-//! (TC-460) checkers live here. Other catalogue stages stay unregistered and
-//! resolve to [`crate::catalogue::RuleState::Unsupported`].
+//! HTML metadata (TC-458), link/URL-shape (TC-459), canonical/indexability
+//! (TC-460) and crawl-depth/orphan (TC-461) checkers live here. Other catalogue
+//! stages stay unregistered and resolve to [`crate::catalogue::RuleState::Unsupported`].
 
 mod indexability;
 mod links;
 mod meta;
+mod navigation;
 
 pub use indexability::{
     DEFAULT_MAX_SITEMAP_BYTES, DEFAULT_MAX_SITEMAP_URLS, indexability_registry,
@@ -21,6 +22,10 @@ pub use meta::{
     DEFAULT_MAX_HTML_BYTES, DEFAULT_MAX_TITLE_CHARS, DEFAULT_MIN_TITLE_CHARS,
     html_metadata_registry, normalize_meta, register_html_metadata,
 };
+pub use navigation::{
+    DEFAULT_MAX_CLICKS, NavigationGraph, PageNavigation, build_navigation_graph,
+    navigation_registry, register_navigation,
+};
 
 use crate::audit::Registry;
 
@@ -29,5 +34,6 @@ pub fn audit_registry() -> Registry {
     register_html_metadata(&mut registry);
     register_link_audit(&mut registry);
     register_indexability(&mut registry);
+    register_navigation(&mut registry);
     registry
 }

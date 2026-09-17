@@ -49,7 +49,7 @@ locations are recorded and never receive credentials.
 
 ## Boundaries
 
-- `crawlytic-core`: profile, URL identity/scope, robots policy, Web Bot Auth transport, bounded crawl, homepage/sitemap discovery, SQLite run persistence, versioned page/link/resource extraction, evidence-based rule execution and finding lifecycle, HTML metadata and link/URL-shape checkers, and typed start/cancel/resume commands with coalesced progress events; no terminal dependency.
+- `crawlytic-core`: profile, URL identity/scope, robots policy, Web Bot Auth transport, bounded crawl, homepage/sitemap discovery, SQLite run persistence, versioned page/link/resource extraction, evidence-based rule execution and finding lifecycle, HTML metadata, link/URL-shape, canonical/indexability, and crawl-depth/orphan checkers, and typed start/cancel/resume commands with coalesced progress events; no terminal dependency.
 - `crawlytic`: Ratatui rendering, key input and background-task coordination.
 - Future interfaces can use the core without depending on Ratatui. The displayed user agent is the HTTP User-Agent string, not a browser viewport.
 
@@ -103,7 +103,12 @@ classification uses the fetched Content-Type, never the file extension alone; Se
 claimed. Heuristic defaults (`max_on_page_links=2500`, `max_query_params=4`, `max_link_chars=2048`,
 `max_redirects=1`, generic-anchor stop-list) are Crawlytic values, not Semrush formulas. The >200
 character page-URL threshold is the inventory baseline. Unfetched link targets stay `incomplete`,
-never `passed`. Other inventory checkers are not shipped; unregistered catalogue rules stay
+never `passed`. Crawl-depth checkers build a directed homepage `<a href>` graph: shortest-path
+click depth with a reproducible path, unique referring pages, one-inbound pages, and sitemap
+URLs with no observed internal inbound link. Canonicals, assets and sitemap membership never
+create a navigation edge. Incomplete crawls label sitemap orphan *candidates* rather than
+definite site-wide orphans. `max_clicks` defaults to 3 (inventory baseline, not a Semrush
+formula). Other inventory checkers are not shipped; unregistered catalogue rules stay
 `unsupported`. Current 14
 September 2026 findings are stored separately from the historical "new issues" column.
 No-count rows are not failures. Duplicate fetch identities are scheduled once. Every URL
@@ -115,7 +120,7 @@ Signature-Input values. Disk-full and migration failures are visible and leave t
 incomplete. Raw HTML retention is off by default and quota-bounded when enabled. An
 uncommitted writer batch (default 32 statements) can be lost on crash.
 
-Not implemented: remaining inventory checkers (canonicals, images, resources, …), cross-run finding history,
+Not implemented: remaining inventory checkers (images, resources, …), cross-run finding history,
 scheduling, credential editing/storage, mobile rendering or JS.
 The page cap (20,000) and historical 3,725-page observation are not catalogue size.
 Weekly Monday is recorded without a time, timezone, or scheduler.
@@ -130,9 +135,8 @@ lists it as an ignored parameter. Path slash variants and query order stay disti
 
 ## Next milestones
 
-1. Shortest-path depth from the homepage graph; sitemaps stay separate evidence.
-2. Remaining inventory checkers over stored observations (canonicals, images, resources); then the broader Semrush catalogue.
-3. Cross-run history, scheduled headless runs and exports. A web UI can follow independently.
+1. Remaining inventory checkers over stored observations (images, resources); then the broader Semrush catalogue.
+2. Cross-run history, scheduled headless runs and exports. A web UI can follow independently.
 
 Recorded TiendaCables settings: www.tiendacables.com; 20,000 page cap; 3,725-page
 historical observation (not an invariant); homepage-link discovery; JS off; crawl
@@ -182,7 +186,9 @@ against the historical 5/73 totals without fabricating storefront URLs. Link/URL
 fixtures cover referring page plus original anchor plus target status, external 403 as an
 access limitation, content-type-based resources-as-page-links without Semrush parity, the
 >200 character baseline, quoted heuristic thresholds, and incomplete evidence when a
-target was not fetched. They do not contact the storefront.
+target was not fetched. Crawl-depth fixtures cover diamond/cycle/disconnected shortest paths,
+canonical/asset/sitemap edges that never count as inbound, a reproducible homepage path in
+depth findings, and coverage-qualified sitemap orphan candidates. They do not contact the storefront.
 
 A user-reported or local `p` sample is operator evidence only. It is not recorded in
 this repository, is not covered by the default `cargo test` run, and is not proof that

@@ -49,12 +49,13 @@ pub use robots::{
     RobotsRunMetadata, UrlAccess, evaluate_url, product_token,
 };
 pub use rules::{
-    DEFAULT_GENERIC_ANCHORS, DEFAULT_MAX_HTML_BYTES, DEFAULT_MAX_LINK_CHARS,
+    DEFAULT_GENERIC_ANCHORS, DEFAULT_MAX_CLICKS, DEFAULT_MAX_HTML_BYTES, DEFAULT_MAX_LINK_CHARS,
     DEFAULT_MAX_ON_PAGE_LINKS, DEFAULT_MAX_QUERY_PARAMS, DEFAULT_MAX_REDIRECTS,
     DEFAULT_MAX_SITEMAP_BYTES, DEFAULT_MAX_SITEMAP_URLS, DEFAULT_MAX_TITLE_CHARS,
-    DEFAULT_MAX_URL_CHARS, DEFAULT_MIN_TITLE_CHARS, audit_registry, html_metadata_registry,
-    indexability_registry, link_audit_registry, normalize_meta, register_html_metadata,
-    register_indexability, register_link_audit,
+    DEFAULT_MAX_URL_CHARS, DEFAULT_MIN_TITLE_CHARS, NavigationGraph, PageNavigation,
+    audit_registry, build_navigation_graph, html_metadata_registry, indexability_registry,
+    link_audit_registry, navigation_registry, normalize_meta, register_html_metadata,
+    register_indexability, register_link_audit, register_navigation,
 };
 pub use scope::{
     ClassifiedUrl, Coverage, CoverageLink, CoverageUrl, FetchIdentity, SKIP_MALFORMED,
