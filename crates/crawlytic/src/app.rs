@@ -227,6 +227,7 @@ impl App {
                 displayed_user_agent: crawlytic_core::DisplayedUserAgent::from_profile(&profile),
                 counters: CrawlCounters::default(),
                 dropped_events: 0,
+                activity: String::new(),
             },
             urls: Vec::new(),
             url_index: 0,
@@ -978,6 +979,7 @@ mod tests {
                 ..CrawlCounters::default()
             },
             dropped_events: 0,
+            activity: String::new(),
         });
         app.handle(Key::Char('/'));
         app.handle(Key::Char('u'));
@@ -993,6 +995,34 @@ mod tests {
         assert_eq!(app.handle(Key::Ctrl('s')), Action::Start);
         app.handle(Key::Esc);
         assert_eq!(app.handle(Key::Char('s')), Action::Start);
+    }
+
+    #[test]
+    fn resource_probe_activity_is_visible_and_quit_works_while_running() {
+        let mut app = app();
+        app.screen = Screen::Run;
+        app.apply_progress(ProgressSnapshot {
+            run_id: Some(8),
+            status: SessionStatus::Running,
+            displayed_user_agent: crawlytic_core::DisplayedUserAgent::from_profile(&app.profile),
+            counters: CrawlCounters {
+                fetched: 1212,
+                pending: 25,
+                ..CrawlCounters::default()
+            },
+            dropped_events: 0,
+            activity: "Probing images/scripts/styles (6000 queued)".into(),
+        });
+        let rendered = render_plain(&app, 100, 24);
+        assert!(
+            rendered.contains("Probing images/scripts/styles (6000 queued)"),
+            "{rendered}"
+        );
+        app.handle(Key::Char('q'));
+        assert!(app.should_quit);
+        app.should_quit = false;
+        app.handle(Key::Char('4'));
+        assert_eq!(app.screen, Screen::Urls);
     }
 
     #[test]

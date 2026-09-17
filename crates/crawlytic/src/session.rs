@@ -1,9 +1,11 @@
 use crate::app::{Action, App, AuthField};
 use crawlytic_core::{
-    AuditConfig, CrawlCommand, CrawlLimits, Engine, EngineConfig, SessionStatus, Store, WebBotAuth,
-    audit_registry, evaluate_stored, export_document, write_export,
+    AuditConfig, AuditReport, CoverageLink, CrawlCommand, CrawlLimits, Engine, EngineConfig,
+    RunSummary, SessionStatus, Store, UrlRecord, WebBotAuth, audit_registry, evaluate_stored,
+    export_document, write_export,
 };
 use std::path::Path;
+use std::sync::mpsc;
 use std::time::Duration;
 use tokio::sync::watch;
 
@@ -11,6 +13,14 @@ pub struct Session {
     runtime: tokio::runtime::Runtime,
     store: Store,
     engine: Option<LiveEngine>,
+    eval_rx: Option<mpsc::Receiver<Result<EvalBundle, String>>>,
+}
+
+struct EvalBundle {
+    urls: Vec<UrlRecord>,
+    links: Vec<CoverageLink>,
+    report: AuditReport,
+    runs: Vec<RunSummary>,
 }
 
 struct LiveEngine {
@@ -29,6 +39,7 @@ impl Session {
             runtime,
             store,
             engine: None,
+            eval_rx: None,
         })
     }
 
@@ -49,7 +60,7 @@ impl Session {
                     app.message = "No run to resume.".into();
                 }
             }
-            Action::Evaluate => self.evaluate(app)?,
+            Action::Evaluate => self.start_evaluate(app),
             Action::SaveProfile => self.save_profile(app)?,
             Action::ApplyAuth => self.apply_auth(app)?,
             Action::Probe => {
@@ -77,13 +88,10 @@ impl Session {
         } else {
             false
         };
-        if completed && let Some(run_id) = app.last_run_id {
-            if let Err(err) = self.load_run(app, run_id) {
-                app.message = err.to_string();
-            } else if let Err(err) = self.evaluate(app) {
-                app.message = err.to_string();
-            }
+        if completed {
+            self.start_evaluate(app);
         }
+        self.poll_evaluate(app);
         Ok(())
     }
 
@@ -133,29 +141,59 @@ impl Session {
         Ok(())
     }
 
-    fn evaluate(&mut self, app: &mut App) -> anyhow::Result<()> {
+    fn start_evaluate(&mut self, app: &mut App) {
+        if self.eval_rx.is_some() {
+            app.message = "Evaluation already running.".into();
+            return;
+        }
         let Some(run_id) = app.last_run_id else {
             app.message = "No run to evaluate.".into();
-            return Ok(());
+            return;
         };
-        let report = evaluate_stored(
-            &self.store,
-            run_id,
-            &AuditConfig::default(),
-            &audit_registry(),
-        )?;
-        let loaded = self.store.load_run(run_id)?;
-        app.set_urls(loaded.urls, loaded.links);
-        app.set_report(report);
-        app.set_runs(self.store.list_runs()?);
-        Ok(())
+        let store = self.store.clone();
+        let (tx, rx) = mpsc::channel();
+        self.eval_rx = Some(rx);
+        app.message = format!("Evaluating run {run_id} (UI stays responsive)…");
+        std::thread::spawn(move || {
+            let result =
+                evaluate_stored(&store, run_id, &AuditConfig::default(), &audit_registry())
+                    .and_then(|report| {
+                        let loaded = store.load_run(run_id)?;
+                        let runs = store.list_runs()?;
+                        Ok(EvalBundle {
+                            urls: loaded.urls,
+                            links: loaded.links,
+                            report,
+                            runs,
+                        })
+                    })
+                    .map_err(|err| err.to_string());
+            let _ = tx.send(result);
+        });
     }
 
-    fn load_run(&mut self, app: &mut App, run_id: i64) -> anyhow::Result<()> {
-        let loaded = self.store.load_run(run_id)?;
-        app.set_urls(loaded.urls, loaded.links);
-        app.set_runs(self.store.list_runs()?);
-        Ok(())
+    fn poll_evaluate(&mut self, app: &mut App) {
+        let Some(rx) = &self.eval_rx else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(Ok(bundle)) => {
+                app.set_urls(bundle.urls, bundle.links);
+                app.set_report(bundle.report);
+                app.set_runs(bundle.runs);
+                app.message = "Evaluation complete.".into();
+                self.eval_rx = None;
+            }
+            Ok(Err(err)) => {
+                app.message = err;
+                self.eval_rx = None;
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => {
+                app.message = "Evaluation failed.".into();
+                self.eval_rx = None;
+            }
+        }
     }
 
     fn save_profile(&self, app: &mut App) -> anyhow::Result<()> {

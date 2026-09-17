@@ -48,6 +48,7 @@ pub const REASON_SITEMAP_FILE_CAP: &str = "Sitemap file cap";
 pub(crate) trait CrawlObserver: Send + Sync {
     fn on_records(&self, records: &BTreeMap<String, UrlRecord>, latest: Option<&UrlRecord>);
     fn on_diagnostic(&self, persist: bool, message: &str);
+    fn on_activity(&self, activity: &str);
 }
 
 #[derive(Clone, Default)]
@@ -71,6 +72,12 @@ impl CrawlNotify {
     fn diagnostic(&self, persist: bool, message: &str) {
         if let Some(inner) = &self.inner {
             inner.on_diagnostic(persist, message);
+        }
+    }
+
+    fn activity(&self, activity: &str) {
+        if let Some(inner) = &self.inner {
+            inner.on_activity(activity);
         }
     }
 }
@@ -627,6 +634,13 @@ impl Crawler {
 
         let robots_cache = Arc::new(robots_cache);
         if !stop_scheduling && !cancel.is_cancelled() {
+            {
+                let state = shared.lock().await;
+                let remaining = state.resource_queue.len();
+                state.notify.activity(&format!(
+                    "Probing images/scripts/styles ({remaining} queued)"
+                ));
+            }
             loop {
                 if cancel.is_cancelled() {
                     stop_scheduling = true;
@@ -638,7 +652,17 @@ impl Crawler {
                     }
                 }
                 while !stop_scheduling && tasks.len() < concurrency {
-                    let Some(url) = shared.lock().await.resource_queue.pop_front() else {
+                    let url = {
+                        let mut state = shared.lock().await;
+                        let remaining = state.resource_queue.len();
+                        if remaining % 25 == 0 {
+                            state.notify.activity(&format!(
+                                "Probing images/scripts/styles ({remaining} queued)"
+                            ));
+                        }
+                        state.resource_queue.pop_front()
+                    };
+                    let Some(url) = url else {
                         break;
                     };
                     let shared = shared.clone();
@@ -689,6 +713,10 @@ impl Crawler {
                 for observation in &existing {
                     enqueue_cross_host_hreflang(&mut state, observation);
                 }
+                let remaining = state.hreflang_queue.len();
+                state.notify.activity(&format!(
+                    "Fetching cross-host hreflang targets ({remaining} queued)"
+                ));
             }
             loop {
                 if cancel.is_cancelled() {
@@ -746,8 +774,14 @@ impl Crawler {
         }
 
         if !stop_scheduling && !cancel.is_cancelled() {
+            shared
+                .lock()
+                .await
+                .notify
+                .activity("Inspecting TLS and HTTP/www host probes");
             run_https_probes(&transport, &profile, &shared, &cancel).await;
         }
+        shared.lock().await.notify.activity("");
 
         let cancelled = cancel.is_cancelled();
         let mut state = shared.lock().await;

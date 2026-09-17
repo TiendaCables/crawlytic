@@ -169,6 +169,8 @@ pub struct ProgressSnapshot {
     pub counters: CrawlCounters,
     /// Discrete events dropped because the consumer lagged. Unit: events, not URLs.
     pub dropped_events: u64,
+    /// Short live phase text (resource probes, TLS). Empty when idle.
+    pub activity: String,
 }
 
 impl ProgressSnapshot {
@@ -179,6 +181,7 @@ impl ProgressSnapshot {
             displayed_user_agent: DisplayedUserAgent::unknown(),
             counters: CrawlCounters::default(),
             dropped_events: 0,
+            activity: String::new(),
         }
     }
 }
@@ -256,6 +259,7 @@ fn spawn_inner(config: EngineConfig, transport: Option<SignedTransport>) -> Engi
         run_id: std::sync::Mutex::new(None),
         status: std::sync::Mutex::new(SessionStatus::Idle),
         user_agent: std::sync::Mutex::new(DisplayedUserAgent::unknown()),
+        activity: std::sync::Mutex::new(String::new()),
     });
     tokio::spawn(run_engine(config, transport, cmd_rx, bus));
     Engine {
@@ -457,6 +461,10 @@ impl CrawlObserver for BusObserver {
             message,
         );
     }
+
+    fn on_activity(&self, activity: &str) {
+        self.0.set_activity(activity);
+    }
 }
 
 struct EventBus {
@@ -466,6 +474,7 @@ struct EventBus {
     run_id: std::sync::Mutex<Option<i64>>,
     status: std::sync::Mutex<SessionStatus>,
     user_agent: std::sync::Mutex<DisplayedUserAgent>,
+    activity: std::sync::Mutex<String>,
 }
 
 impl EventBus {
@@ -508,8 +517,19 @@ impl EventBus {
                 .clone(),
             counters,
             dropped_events: self.dropped.load(Ordering::SeqCst),
+            activity: self
+                .activity
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
         };
         let _ = self.progress.send(snapshot);
+    }
+
+    fn set_activity(&self, activity: &str) {
+        *self.activity.lock().unwrap_or_else(|e| e.into_inner()) = activity.to_owned();
+        let counters = self.progress.borrow().counters;
+        self.publish_progress(counters);
     }
 
     fn publish_status(&self, run_id: i64, status: SessionStatus) {
@@ -612,6 +632,7 @@ mod tests {
             run_id: std::sync::Mutex::new(Some(1)),
             status: std::sync::Mutex::new(SessionStatus::Running),
             user_agent: std::sync::Mutex::new(DisplayedUserAgent::unknown()),
+            activity: std::sync::Mutex::new(String::new()),
         };
         let n = DISCRETE_EVENT_CAPACITY as u64 + 20;
         for i in 0..n {
