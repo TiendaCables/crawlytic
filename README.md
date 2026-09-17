@@ -55,7 +55,7 @@ locations are recorded and never receive credentials.
 
 ## Boundaries
 
-- `crawlytic-core`: profile, URL identity/scope, robots policy, Web Bot Auth transport, bounded crawl, homepage/sitemap discovery, SQLite run persistence, versioned page/link/resource extraction, evidence-based rule execution and finding lifecycle, HTML metadata, link/URL-shape, canonical/indexability, crawl-depth/orphan, resource and hreflang/lang checkers, typed start/cancel/resume commands with coalesced progress events, run listing for resume, CSV/JSON audit export, and a read-only generic CSV baseline importer; no terminal dependency.
+- `crawlytic-core`: profile, URL identity/scope, robots policy, Web Bot Auth transport, bounded crawl, homepage/sitemap discovery, SQLite run persistence, versioned page/link/resource extraction, evidence-based rule execution and finding lifecycle, HTML metadata, link/URL-shape, canonical/indexability, crawl-depth/orphan, resource, hreflang/lang and duplicate-content checkers, typed start/cancel/resume commands with coalesced progress events, run listing for resume, CSV/JSON audit export, and a read-only generic CSV baseline importer; no terminal dependency.
 - `crawlytic`: Ratatui rendering, key input, profile/auth screens, run/URL/finding investigation and background-task coordination.
 - Future interfaces can use the core without depending on Ratatui. The displayed user agent is the HTTP User-Agent string, not a browser viewport.
 
@@ -79,8 +79,8 @@ links, resource references, sitemap membership and idempotent findings. Versione
 link and resource observations (schema v3) extracted from fetched bodies so later rules
 share evidence without refetching: titles, descriptions, headings, robots meta/headers,
 canonicals, hreflang/lang, viewport, doctype, encoding, declared charset, frames,
-legacy plugin markup, meta refresh, redirect hops, text, anchors/rel (image-only anchors
-use img alt) and
+legacy plugin markup, meta refresh, redirect hops, text (nav/header/footer/aside chrome omitted),
+anchors/rel (image-only anchors use img alt) and
 images/scripts/styles, plus status, timings, content type, raw versus decoded sizes and
 completeness. Truncated, challenge, error and non-HTML bodies cannot be marked complete.
 The extraction schema has no severity or UI fields. Typed crawl
@@ -122,8 +122,15 @@ hreflang absent is a warning. Content-language disagreement is a Crawlytic stopw
 with confidence (`min_language_hits`, `min_language_confidence`), not a parser or Semrush
 formula. Cross-host locale targets are fetched once over unsigned HTTPS (or a separately
 authorized transport) and do not consume `max_pages` or receive Web Bot Auth headers; same-host
-unfetched targets stay `incomplete`. Other inventory checkers are not shipped; unregistered
-catalogue rules stay `unsupported`. Current 14
+unfetched targets stay `incomplete`. Duplicate-content checkers hash chrome-stripped main text after
+trim-and-collapse-whitespace and recurring 5-gram boilerplate removal (`boilerplate_min_pages=3`).
+Exact groups use a 64-bit FNV-1a fingerprint. Near-duplicates use 64-bit simhash with 4×16-bit LSH
+bands so comparisons stay bounded at a 20k URL cap (`near_duplicate_max_hamming=3`, `min_main_tokens=12`).
+Reports include group method, fingerprint/hamming evidence and canonical/indexability context.
+Product variants that keep distinct main copy are not grouped. Truncated, non-HTML, challenge, error
+and robots-blocked responses never enter normal groups. Thresholds are Crawlytic heuristics, not
+Semrush formulas; near-duplicate grouping is transitive and uncertain. Other inventory checkers are
+not shipped; unregistered catalogue rules stay `unsupported`. Current 14
 September 2026 findings are stored separately from the historical "new issues" column.
 No-count rows are not failures. Evaluated runs export CSV and JSON with stable finding
 identities, severity, unit, URL, evidence, status and run coverage. Formula-leading cells
@@ -142,7 +149,7 @@ Signature-Input values. Disk-full and migration failures are visible and leave t
 incomplete. Raw HTML retention is off by default and quota-bounded when enabled. An
 uncommitted writer batch (default 32 statements) can be lost on crash.
 
-Not implemented: remaining inventory checkers beyond the shipped HTML/link/indexability/navigation/resource/hreflang set, cross-run finding history,
+Not implemented: remaining inventory checkers beyond the shipped HTML/link/indexability/navigation/resource/hreflang/duplicate-content set, cross-run finding history,
 scheduling, a credential vault (masked process-environment setup only), mobile rendering or JS.
 The page cap (20,000) and historical 3,725-page observation are not catalogue size.
 Weekly Monday is recorded without a time, timezone, or scheduler.

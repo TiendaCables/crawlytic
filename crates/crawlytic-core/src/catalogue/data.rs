@@ -216,9 +216,9 @@ pub const RULES: &[Rule] = &[
         "Crawled HTML pages",
         thr(
             "exact_or_near_duplicate",
-            None,
+            Some("exact hash; simhash hamming<=3"),
             true,
-            "Exact vs near-duplicate threshold is owned by TC-466. Do not infer a private formula.",
+            "Exact FNV-1a after chrome-tag omission, whitespace collapse and recurring 5-gram removal (boilerplate_min_pages=3). Near-duplicate uses 64-bit simhash with 4×16-bit LSH bands; default near_duplicate_max_hamming=3. Crawlytic heuristic, not a Semrush formula. Truncated/non-HTML/blocked responses are excluded.",
         ),
         &["https://developers.google.com/search/docs/crawling-indexing/canonicalization"],
         &["TC-466"],
