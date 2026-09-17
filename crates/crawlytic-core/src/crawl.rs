@@ -547,6 +547,9 @@ impl Crawler {
             resource_queue: VecDeque::new(),
             resource_seen: BTreeSet::new(),
             resource_fetches: Vec::new(),
+            hreflang_queue: VecDeque::new(),
+            hreflang_seen: BTreeSet::new(),
+            start_url: self.profile.start_url.clone(),
         }));
         let gate = Arc::new(tokio::sync::Mutex::new(None::<tokio::time::Instant>));
         let mut tasks = tokio::task::JoinSet::new();
@@ -671,6 +674,69 @@ impl Crawler {
             while tasks.join_next().await.is_some() {}
         }
 
+        if !stop_scheduling && !cancel.is_cancelled() {
+            {
+                let mut state = shared.lock().await;
+                let existing = state.observations.clone();
+                for observation in &existing {
+                    enqueue_cross_host_hreflang(&mut state, observation);
+                }
+            }
+            loop {
+                if cancel.is_cancelled() {
+                    stop_scheduling = true;
+                }
+                {
+                    let state = shared.lock().await;
+                    if state.auth_failed || state.persist_error.is_some() {
+                        stop_scheduling = true;
+                    }
+                }
+                while !stop_scheduling && tasks.len() < concurrency {
+                    let Some(url) = shared.lock().await.hreflang_queue.pop_front() else {
+                        break;
+                    };
+                    let shared = shared.clone();
+                    let transport = transport.clone();
+                    let profile = profile.clone();
+                    let limits = limits.clone();
+                    let cancel = cancel.clone();
+                    let gate = gate.clone();
+                    let robots_file = robots_file.clone();
+                    let robots_cache = robots_cache.clone();
+                    tasks.spawn(async move {
+                        process_hreflang_target(
+                            url,
+                            transport,
+                            profile,
+                            limits,
+                            cancel,
+                            gate,
+                            robots_file,
+                            robots_cache,
+                            shared,
+                        )
+                        .await
+                    });
+                }
+                if tasks.is_empty() {
+                    break;
+                }
+                tokio::select! {
+                    _ = cancel.cancelled() => {
+                        stop_scheduling = true;
+                        tasks.abort_all();
+                    }
+                    joined = tasks.join_next() => {
+                        if let Some(Ok(WorkerOut::Auth | WorkerOut::Cancelled)) = joined {
+                            stop_scheduling = true;
+                        }
+                    }
+                }
+            }
+            while tasks.join_next().await.is_some() {}
+        }
+
         let cancelled = cancel.is_cancelled();
         let mut state = shared.lock().await;
         let auth_failed = state.auth_failed;
@@ -748,6 +814,9 @@ struct RunState {
     resource_queue: VecDeque<Url>,
     resource_seen: BTreeSet<String>,
     resource_fetches: Vec<ResourceFetch>,
+    hreflang_queue: VecDeque<Url>,
+    hreflang_seen: BTreeSet<String>,
+    start_url: Url,
 }
 
 struct PageOffer {
@@ -1149,7 +1218,46 @@ async fn persist_observation(
         note_persist_error(&mut state, err);
     }
     enqueue_page_resources(&mut state, &observation);
+    enqueue_cross_host_hreflang(&mut state, &observation);
     state.observations.push(observation);
+}
+
+fn enqueue_cross_host_hreflang(state: &mut RunState, observation: &ExtractedObservations) {
+    for item in &observation.page.hreflangs {
+        let Some(destination) = resolve_hreflang_href(&observation.identity, &item.href) else {
+            continue;
+        };
+        let Ok(url) = Url::parse(&destination) else {
+            continue;
+        };
+        if url.scheme() != "https" {
+            continue;
+        }
+        if url.origin() == state.start_url.origin() {
+            continue;
+        }
+        let key = FetchIdentity::from_url(&url).as_str().to_owned();
+        if state
+            .observations
+            .iter()
+            .any(|existing| existing.identity == key)
+        {
+            continue;
+        }
+        if state.hreflang_seen.insert(key) {
+            state.hreflang_queue.push_back(url);
+        }
+    }
+}
+
+fn resolve_hreflang_href(base: &str, href: &str) -> Option<String> {
+    let href = href.trim();
+    if href.is_empty() {
+        return None;
+    }
+    let base = Url::parse(base).ok()?;
+    let resolved = base.join(href).ok()?;
+    Some(FetchIdentity::from_url(&resolved).as_str().to_owned())
 }
 
 fn enqueue_page_resources(state: &mut RunState, observation: &ExtractedObservations) {
@@ -1227,6 +1335,122 @@ async fn process_resource(
     fetch.robots_known = robots_known;
     persist_resource_fetch(&shared, fetch).await;
     WorkerOut::Done
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn process_hreflang_target(
+    url: Url,
+    transport: SignedTransport,
+    profile: Profile,
+    limits: CrawlLimits,
+    cancel: CancelHandle,
+    gate: Arc<tokio::sync::Mutex<Option<tokio::time::Instant>>>,
+    robots_file: Option<Arc<RobotsFile>>,
+    robots_cache: Arc<RobotsCache>,
+    shared: Arc<tokio::sync::Mutex<RunState>>,
+) -> WorkerOut {
+    if cancel.is_cancelled() {
+        return WorkerOut::Cancelled;
+    }
+    let identity = FetchIdentity::from_url(&url).as_str().to_owned();
+    {
+        let state = shared.lock().await;
+        if state
+            .observations
+            .iter()
+            .any(|observation| observation.identity == identity)
+        {
+            return WorkerOut::Done;
+        }
+    }
+    let same_origin = url.origin() == profile.start_url.origin();
+    let file = if same_origin {
+        robots_file.as_deref().cloned()
+    } else {
+        Some(robots_cache.for_url_unsigned(&transport, &url).await)
+    };
+    let (robots_blocked, robots_known) = match file.as_ref() {
+        Some(file) => {
+            let known = !matches!(
+                file.fetch_state(),
+                crate::robots::RobotsFetchState::Unavailable { .. }
+            );
+            let blocked = matches!(file.decide(&profile, &url), UrlAccess::Blocked(_));
+            (blocked, known)
+        }
+        None => (false, false),
+    };
+    if robots_blocked {
+        persist_resource_fetch(
+            &shared,
+            ResourceFetch {
+                identity,
+                status: None,
+                failed_reason: None,
+                challenge: false,
+                credentials_attached: false,
+                robots_blocked: true,
+                robots_known: true,
+                content_type: String::new(),
+            },
+        )
+        .await;
+        return WorkerOut::Done;
+    }
+    pace(&gate, &limits).await;
+    if cancel.is_cancelled() {
+        return WorkerOut::Cancelled;
+    }
+    match transport
+        .get_unsigned(&url, limits.max_response_bytes)
+        .await
+    {
+        Ok((status, content_type, body)) => {
+            persist_locale_observation(&shared, &url, status, &content_type, &body).await;
+        }
+        Err(err) => {
+            persist_resource_fetch(
+                &shared,
+                ResourceFetch {
+                    identity,
+                    status: None,
+                    failed_reason: Some(err.observation().to_owned()),
+                    challenge: false,
+                    credentials_attached: false,
+                    robots_blocked: false,
+                    robots_known,
+                    content_type: String::new(),
+                },
+            )
+            .await;
+        }
+    }
+    WorkerOut::Done
+}
+
+async fn persist_locale_observation(
+    shared: &tokio::sync::Mutex<RunState>,
+    url: &Url,
+    status: u16,
+    content_type: &str,
+    body: &[u8],
+) {
+    let observation = extract(&ExtractInput {
+        destination_url: url,
+        status,
+        content_type,
+        headers: &[],
+        body,
+        truncated: false,
+        duration_ms: None,
+    });
+    let mut state = shared.lock().await;
+    if let Some(session) = state.persist.clone()
+        && let Err(err) = session.store.put_observation(session.run_id, &observation)
+    {
+        note_persist_error(&mut state, err);
+    }
+    state.observations.push(observation);
 }
 
 async fn persist_resource_fetch(shared: &tokio::sync::Mutex<RunState>, fetch: ResourceFetch) {
@@ -2404,6 +2628,72 @@ lists_complete = false
         assert_eq!(css_hits[0].method, "HEAD");
         assert_eq!(css_hits[1].method, "GET");
         assert!(recorded.iter().all(|req| req.path != "/secret.png"));
+        assert!(!format!("{report:?}").contains("TESTSIGNATUREVALUE"));
+    }
+
+    #[tokio::test]
+    async fn cross_host_hreflang_targets_use_unsigned_transport() {
+        let origin = TestOrigin::https();
+        let locale = TestOrigin::https();
+        origin.allow_robots();
+        let locale_en = locale.href("/en");
+        origin.on(
+            "/",
+            200,
+            "text/html",
+            &format!(
+                r#"<!DOCTYPE html><html lang="es"><head>
+              <link rel="alternate" hreflang="es" href="/">
+              <link rel="alternate" hreflang="en" href="{locale_en}">
+              <link rel="alternate" hreflang="x-default" href="/">
+            </head><body>hola</body></html>"#
+            ),
+        );
+        locale.on(
+            "/en",
+            200,
+            "text/html",
+            &format!(
+                r#"<!DOCTYPE html><html lang="en"><head>
+              <link rel="alternate" hreflang="es" href="{}">
+              <link rel="alternate" hreflang="en" href="/en">
+            </head><body>hello</body></html>"#,
+                origin.href("/")
+            ),
+        );
+        let mut lim = limits();
+        lim.concurrency = 1;
+        lim.max_urls = 1;
+        let mut crawl = crawler(&origin, lim);
+        let report = crawl.run().await;
+        assert!(report.completed, "{report:?}");
+        assert_eq!(
+            report.urls.len(),
+            1,
+            "locale targets must not consume page slots"
+        );
+        assert_eq!(report.urls[0].state, UrlState::Fetched);
+        assert!(
+            report
+                .observations
+                .iter()
+                .any(|observation| observation.identity.contains("/en")
+                    && observation
+                        .page
+                        .hreflangs
+                        .iter()
+                        .any(|item| item.lang == "es")),
+            "{report:?}"
+        );
+        let locale_hits: Vec<_> = locale
+            .recorded()
+            .into_iter()
+            .filter(|req| req.path == "/en")
+            .collect();
+        assert_eq!(locale_hits.len(), 1, "{locale_hits:?}");
+        assert_eq!(locale_hits[0].method, "GET");
+        assert!(!locale_hits[0].headers.contains_key("signature"));
+        assert!(!locale_hits[0].headers.contains_key("signature-input"));
         assert!(!format!("{report:?}").contains("TESTSIGNATUREVALUE"));
     }
 
