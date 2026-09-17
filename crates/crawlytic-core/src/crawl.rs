@@ -454,6 +454,7 @@ impl Crawler {
                         &self.frontier,
                         self.coverage.links(),
                         &inventory,
+                        robots_meta.as_ref(),
                         true,
                     )
                     .err()
@@ -489,6 +490,7 @@ impl Crawler {
                 &self.frontier,
                 self.coverage.links(),
                 &sitemap,
+                robots_meta.as_ref(),
                 true,
             )
             .err()
@@ -514,6 +516,7 @@ impl Crawler {
             &self.frontier,
             self.coverage.links(),
             &sitemap,
+            robots_meta.as_ref(),
             true,
         ) {
             finish_persisted(self.persist.as_ref(), false, false, Some(&err.to_string()));
@@ -641,6 +644,7 @@ impl Crawler {
                 &self.frontier,
                 self.coverage.links(),
                 &sitemap,
+                robots_meta.as_ref(),
                 true,
             )
             .err()
@@ -950,6 +954,7 @@ fn persist_checkpoint(
     frontier: &VecDeque<FetchIdentity>,
     links: &[CoverageLink],
     sitemap: &SitemapInventory,
+    robots: Option<&RobotsRunMetadata>,
     flush: bool,
 ) -> Result<(), StoreError> {
     let Some(session) = persist else {
@@ -964,6 +969,9 @@ fn persist_checkpoint(
     session.store.replace_links(session.run_id, links)?;
     session.store.save_sitemap(session.run_id, sitemap)?;
     session.store.mark_sitemap_done(session.run_id)?;
+    if let Some(robots) = robots {
+        session.store.save_robots(session.run_id, robots)?;
+    }
     if flush {
         session.store.flush()?;
     }
