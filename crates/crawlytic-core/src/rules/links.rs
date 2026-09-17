@@ -1182,6 +1182,9 @@ mod tests {
             &EvidenceBundle {
                 observations: obs,
                 urls,
+                sitemap: None,
+                sitemap_done: false,
+                robots: None,
             },
             &config(),
             &link_audit_registry(),

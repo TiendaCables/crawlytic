@@ -7,8 +7,9 @@
 use crate::catalogue::{
     CATALOGUE_VERSION, RuleState, Severity, StateInput, resolve_state, rule_by_id, rules,
 };
-use crate::crawl::UrlRecord;
+use crate::crawl::{SitemapInventory, UrlRecord};
 use crate::extract::ExtractedObservations;
+use crate::robots::RobotsRunMetadata;
 use crate::store::{Store, StoreError};
 use std::collections::BTreeMap;
 use std::fmt::{Debug, Formatter};
@@ -74,6 +75,9 @@ impl AuditConfig {
 pub struct EvidenceBundle<'a> {
     pub observations: &'a [ExtractedObservations],
     pub urls: &'a [UrlRecord],
+    pub sitemap: Option<&'a SitemapInventory>,
+    pub sitemap_done: bool,
+    pub robots: Option<&'a RobotsRunMetadata>,
 }
 
 /// Stable identity: rule id plus affected entity. Config changes update the
@@ -368,6 +372,9 @@ pub fn evaluate_stored(
     let evidence = EvidenceBundle {
         observations: &run.observations,
         urls: &run.urls,
+        sitemap: Some(&run.sitemap),
+        sitemap_done: run.sitemap_done,
+        robots: run.robots.as_ref(),
     };
     let report = evaluate(run_id, &evidence, config, registry, &suppressions);
     store.save_audit_report(&report)?;
@@ -648,6 +655,9 @@ mod tests {
             &EvidenceBundle {
                 observations: obs,
                 urls: &[],
+                sitemap: None,
+                sitemap_done: false,
+                robots: None,
             },
             config,
             registry,

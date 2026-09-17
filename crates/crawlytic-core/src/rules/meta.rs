@@ -747,6 +747,9 @@ mod tests {
             &EvidenceBundle {
                 observations: obs,
                 urls: &[],
+                sitemap: None,
+                sitemap_done: false,
+                robots: None,
             },
             &config(),
             &html_metadata_registry(),

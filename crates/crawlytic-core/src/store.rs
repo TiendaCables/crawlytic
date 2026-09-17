@@ -15,6 +15,7 @@ use crate::extract::{
     ObservationFlags, PageObservation, RedirectHop, ResourceObservation,
 };
 use crate::profile::Profile;
+use crate::robots::{RobotsFetchState, RobotsRunMetadata};
 use crate::scope::{CoverageLink, CoverageUrl, FetchIdentity};
 use crate::transport::{FetchRecord, ResourceKind};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -24,7 +25,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use url::Url;
 
-pub const STORE_SCHEMA_VERSION: i64 = 5;
+pub const STORE_SCHEMA_VERSION: i64 = 6;
 const DEFAULT_BATCH_SIZE: usize = 32;
 
 const MIGRATION_1: &str = "
@@ -307,6 +308,24 @@ CREATE TABLE observation_redirects (
 );
 ";
 
+const MIGRATION_6: &str = "
+CREATE TABLE robots_runs (
+    run_id INTEGER PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+    origin TEXT NOT NULL,
+    user_agent TEXT NOT NULL,
+    product_token TEXT NOT NULL,
+    selected_group TEXT,
+    bypass_robots INTEGER NOT NULL,
+    bypass_meta INTEGER NOT NULL,
+    fetch_kind TEXT NOT NULL,
+    fetch_status INTEGER,
+    fetch_observation TEXT,
+    sitemaps TEXT NOT NULL,
+    format_errors TEXT NOT NULL,
+    crawl_delay_notes TEXT NOT NULL
+);
+";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StoreErrorKind {
     DiskFull,
@@ -454,6 +473,7 @@ pub struct LoadedRun {
     pub resources: Vec<ResourceRef>,
     pub sitemap: SitemapInventory,
     pub sitemap_done: bool,
+    pub robots: Option<RobotsRunMetadata>,
     pub findings: Vec<FindingRecord>,
     pub observations: Vec<ExtractedObservations>,
 }
@@ -736,6 +756,64 @@ impl Store {
                     identity,
                     resource_kind_str(kind),
                     referring_identity
+                ],
+            )?;
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    pub fn save_robots(&self, run_id: i64, robots: &RobotsRunMetadata) -> Result<(), StoreError> {
+        let (fetch_kind, fetch_status, fetch_observation) = match &robots.fetch {
+            RobotsFetchState::Fetched { status } => ("fetched", Some(*status as i64), None),
+            RobotsFetchState::NotFound { status } => ("not_found", Some(*status as i64), None),
+            RobotsFetchState::Unavailable { observation } => {
+                ("unavailable", None, Some(observation.as_str()))
+            }
+        };
+        let sitemaps = robots
+            .sitemaps
+            .iter()
+            .map(Url::as_str)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let format_errors = robots.format_errors.join("\n");
+        let crawl_delay_notes = robots.crawl_delay_notes.join("\n");
+        let mut inner = self.lock();
+        inner.write(|conn| {
+            conn.execute(
+                "INSERT INTO robots_runs(
+                    run_id, origin, user_agent, product_token, selected_group,
+                    bypass_robots, bypass_meta, fetch_kind, fetch_status, fetch_observation,
+                    sitemaps, format_errors, crawl_delay_notes
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                 ON CONFLICT(run_id) DO UPDATE SET
+                    origin=excluded.origin,
+                    user_agent=excluded.user_agent,
+                    product_token=excluded.product_token,
+                    selected_group=excluded.selected_group,
+                    bypass_robots=excluded.bypass_robots,
+                    bypass_meta=excluded.bypass_meta,
+                    fetch_kind=excluded.fetch_kind,
+                    fetch_status=excluded.fetch_status,
+                    fetch_observation=excluded.fetch_observation,
+                    sitemaps=excluded.sitemaps,
+                    format_errors=excluded.format_errors,
+                    crawl_delay_notes=excluded.crawl_delay_notes",
+                params![
+                    run_id,
+                    robots.origin,
+                    robots.user_agent,
+                    robots.product_token,
+                    robots.selected_group,
+                    robots.bypass_robots as i64,
+                    robots.bypass_meta as i64,
+                    fetch_kind,
+                    fetch_status,
+                    fetch_observation,
+                    sitemaps,
+                    format_errors,
+                    crawl_delay_notes,
                 ],
             )?;
             Ok(())
@@ -1332,6 +1410,16 @@ fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
             params![5, now_secs()],
         )
         .map_err(|err| StoreError::migration(err.to_string()))?;
+        current = 5;
+    }
+    if current < 6 {
+        tx.execute_batch(MIGRATION_6)
+            .map_err(|err| StoreError::migration(err.to_string()))?;
+        tx.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (?1, ?2)",
+            params![6, now_secs()],
+        )
+        .map_err(|err| StoreError::migration(err.to_string()))?;
     }
     tx.commit()
         .map_err(|err| StoreError::migration(err.to_string()))?;
@@ -1429,6 +1517,7 @@ fn load_run_from(conn: &Connection, run_id: i64) -> Result<LoadedRun, StoreError
         resources,
         sitemap,
         sitemap_done: sitemap_done != 0,
+        robots: load_robots(conn, run_id)?,
         findings,
         observations,
     })
@@ -1667,6 +1756,96 @@ fn load_sitemap(conn: &Connection, run_id: i64) -> Result<SitemapInventory, Stor
         });
     }
     Ok(SitemapInventory { files, urls })
+}
+
+fn load_robots(conn: &Connection, run_id: i64) -> Result<Option<RobotsRunMetadata>, StoreError> {
+    let row = conn
+        .query_row(
+            "SELECT origin, user_agent, product_token, selected_group, bypass_robots, bypass_meta,
+                    fetch_kind, fetch_status, fetch_observation, sitemaps, format_errors,
+                    crawl_delay_notes
+             FROM robots_runs WHERE run_id = ?1",
+            params![run_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, Option<i64>>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                    row.get::<_, String>(9)?,
+                    row.get::<_, String>(10)?,
+                    row.get::<_, String>(11)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(map_write)?;
+    let Some((
+        origin,
+        user_agent,
+        product_token,
+        selected_group,
+        bypass_robots,
+        bypass_meta,
+        fetch_kind,
+        fetch_status,
+        fetch_observation,
+        sitemaps,
+        format_errors,
+        crawl_delay_notes,
+    )) = row
+    else {
+        return Ok(None);
+    };
+    let fetch = match (fetch_kind.as_str(), fetch_status, fetch_observation) {
+        ("fetched", Some(status), _) => RobotsFetchState::Fetched {
+            status: status as u16,
+        },
+        ("not_found", Some(status), _) => RobotsFetchState::NotFound {
+            status: status as u16,
+        },
+        ("unavailable", _, observation) => RobotsFetchState::Unavailable {
+            observation: observation.unwrap_or_default(),
+        },
+        (other, _, _) => {
+            return Err(StoreError::other(format!(
+                "Unknown robots fetch kind {other}"
+            )));
+        }
+    };
+    let sitemaps = if sitemaps.is_empty() {
+        Vec::new()
+    } else {
+        sitemaps
+            .split('\n')
+            .map(|value| Url::parse(value).map_err(|err| StoreError::other(err.to_string())))
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    Ok(Some(RobotsRunMetadata {
+        origin,
+        user_agent,
+        product_token,
+        selected_group,
+        bypass_robots: bypass_robots != 0,
+        bypass_meta: bypass_meta != 0,
+        fetch,
+        sitemaps,
+        format_errors: split_lines(&format_errors),
+        crawl_delay_notes: split_lines(&crawl_delay_notes),
+    }))
+}
+
+fn split_lines(value: &str) -> Vec<String> {
+    if value.is_empty() {
+        Vec::new()
+    } else {
+        value.split('\n').map(str::to_owned).collect()
+    }
 }
 
 fn load_findings(conn: &Connection, run_id: i64) -> Result<Vec<FindingRecord>, StoreError> {
