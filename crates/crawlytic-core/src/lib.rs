@@ -56,15 +56,17 @@ pub use robots::{
     RobotsRunMetadata, UrlAccess, evaluate_url, product_token,
 };
 pub use rules::{
-    DEFAULT_GENERIC_ANCHORS, DEFAULT_MAX_CLICKS, DEFAULT_MAX_HTML_BYTES, DEFAULT_MAX_LINK_CHARS,
-    DEFAULT_MAX_ON_PAGE_LINKS, DEFAULT_MAX_QUERY_PARAMS, DEFAULT_MAX_REDIRECTS,
-    DEFAULT_MAX_SITEMAP_BYTES, DEFAULT_MAX_SITEMAP_URLS, DEFAULT_MAX_TITLE_CHARS,
-    DEFAULT_MAX_URL_CHARS, DEFAULT_MIN_LANGUAGE_CONFIDENCE, DEFAULT_MIN_LANGUAGE_HITS,
-    DEFAULT_MIN_TITLE_CHARS, NavigationGraph, PageNavigation, audit_registry,
-    build_navigation_graph, hreflang_registry, html_metadata_registry, indexability_registry,
-    link_audit_registry, navigation_registry, normalize_meta, register_hreflang,
-    register_html_metadata, register_indexability, register_link_audit, register_navigation,
-    register_resource_audit, resource_audit_registry,
+    DEFAULT_BOILERPLATE_MIN_PAGES, DEFAULT_GENERIC_ANCHORS, DEFAULT_MAX_CLICKS,
+    DEFAULT_MAX_HTML_BYTES, DEFAULT_MAX_LINK_CHARS, DEFAULT_MAX_ON_PAGE_LINKS,
+    DEFAULT_MAX_QUERY_PARAMS, DEFAULT_MAX_REDIRECTS, DEFAULT_MAX_SITEMAP_BYTES,
+    DEFAULT_MAX_SITEMAP_URLS, DEFAULT_MAX_TITLE_CHARS, DEFAULT_MAX_URL_CHARS,
+    DEFAULT_MIN_LANGUAGE_CONFIDENCE, DEFAULT_MIN_LANGUAGE_HITS, DEFAULT_MIN_MAIN_TOKENS,
+    DEFAULT_MIN_TITLE_CHARS, DEFAULT_NEAR_DUPLICATE_MAX_HAMMING, NavigationGraph, PageNavigation,
+    audit_registry, build_navigation_graph, content_registry, hreflang_registry,
+    html_metadata_registry, indexability_registry, link_audit_registry, navigation_registry,
+    normalize_meta, register_content, register_hreflang, register_html_metadata,
+    register_indexability, register_link_audit, register_navigation, register_resource_audit,
+    resource_audit_registry,
 };
 pub use scope::{
     ClassifiedUrl, Coverage, CoverageLink, CoverageUrl, FetchIdentity, SKIP_MALFORMED,

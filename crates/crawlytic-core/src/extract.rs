@@ -490,13 +490,16 @@ fn parse_html(
     let mut i = 0;
     let mut base_href = None;
     let mut text = String::new();
+    let mut chrome_depth = 0usize;
     while i < bytes.len() {
         if bytes[i] != b'<' {
             let start = i;
             while i < bytes.len() && bytes[i] != b'<' {
                 i += 1;
             }
-            push_text(&mut text, &html[start..i]);
+            if chrome_depth == 0 {
+                push_text(&mut text, &html[start..i]);
+            }
             continue;
         }
         if starts_with_ignore_ascii(bytes, i, b"<!--") {
@@ -550,6 +553,19 @@ fn parse_html(
         }
         if tag_opens(bytes, i, b"noscript") {
             i = skip_element(bytes, i, b"noscript");
+            continue;
+        }
+        if let Some(closing) = chrome_tag(bytes, i) {
+            if closing {
+                chrome_depth = chrome_depth.saturating_sub(1);
+            } else {
+                chrome_depth = chrome_depth.saturating_add(1);
+            }
+            if let Some((end, _)) = read_tag(bytes, i) {
+                i = end;
+            } else {
+                i += 1;
+            }
             continue;
         }
         if tag_opens(bytes, i, b"html") {
@@ -635,7 +651,9 @@ fn parse_html(
                         "a",
                     );
                 }
-                push_text(&mut text, &strip_tags(&inner));
+                if chrome_depth == 0 {
+                    push_text(&mut text, &strip_tags(&inner));
+                }
                 i = next;
             } else {
                 i += 1;
@@ -713,7 +731,9 @@ fn parse_html(
                     level,
                     text: value.clone(),
                 });
-                push_text(&mut text, &value);
+                if chrome_depth == 0 {
+                    push_text(&mut text, &value);
+                }
                 i = next;
             } else {
                 i += 1;
@@ -975,6 +995,52 @@ fn starts_with_ignore_ascii(bytes: &[u8], i: usize, needle: &[u8]) -> bool {
         return false;
     };
     slice.eq_ignore_ascii_case(needle)
+}
+
+fn chrome_tag(bytes: &[u8], i: usize) -> Option<bool> {
+    for name in [b"nav".as_slice(), b"header", b"footer", b"aside"] {
+        if tag_opens(bytes, i, name) {
+            return Some(false);
+        }
+        if tag_closes(bytes, i, name) {
+            return Some(true);
+        }
+    }
+    None
+}
+
+fn tag_closes(bytes: &[u8], i: usize, name: &[u8]) -> bool {
+    if !starts_with_ignore_ascii(bytes, i, b"<") {
+        return false;
+    }
+    let mut j = i + 1;
+    while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+        j += 1;
+    }
+    if j >= bytes.len() || bytes[j] != b'/' {
+        return false;
+    }
+    j += 1;
+    while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+        j += 1;
+    }
+    if let Some(colon) = bytes.get(j..).and_then(|rest| {
+        rest.iter()
+            .take_while(|b| b.is_ascii_alphanumeric() || **b == b'-' || **b == b'_' || **b == b':')
+            .position(|b| *b == b':')
+    }) {
+        let local = j + colon + 1;
+        if starts_with_ignore_ascii(bytes, local, name) {
+            let after = local + name.len();
+            return after == bytes.len()
+                || matches!(bytes[after], b' ' | b'\t' | b'\n' | b'\r' | b'>');
+        }
+    }
+    if !starts_with_ignore_ascii(bytes, j, name) {
+        return false;
+    }
+    let after = j + name.len();
+    after == bytes.len() || matches!(bytes[after], b' ' | b'\t' | b'\n' | b'\r' | b'>')
 }
 
 fn tag_opens(bytes: &[u8], i: usize, name: &[u8]) -> bool {
@@ -1543,6 +1609,25 @@ mod tests {
         assert!(plugin.page.has_plugin_markup);
         let object = extract_html("<html><body><object data=\"a.swf\"></object></body></html>");
         assert!(object.page.has_plugin_markup);
+    }
+
+    #[test]
+    fn chrome_elements_are_omitted_from_page_text_but_links_remain() {
+        let obs = extract_html(
+            r#"<html><body>
+              <nav><a href="/cart">Cart</a> Store nav</nav>
+              <header>Site banner</header>
+              <main><p>Unique product copy here</p></main>
+              <aside>Related widgets</aside>
+              <footer>Privacy</footer>
+            </body></html>"#,
+        );
+        assert!(obs.page.text.contains("Unique product copy here"));
+        assert!(!obs.page.text.contains("Store nav"));
+        assert!(!obs.page.text.contains("Site banner"));
+        assert!(!obs.page.text.contains("Related widgets"));
+        assert!(!obs.page.text.contains("Privacy"));
+        assert!(obs.links.iter().any(|link| link.href == "/cart"));
     }
 
     #[test]

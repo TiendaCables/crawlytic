@@ -1,10 +1,12 @@
 //! Inventory checkers over stored observations.
 //!
 //! HTML metadata (TC-458), link/URL-shape (TC-459), canonical/indexability
-//! (TC-460), crawl-depth/orphan (TC-461), image/script/style (TC-462) and
-//! hreflang/lang (TC-465) checkers live here. Other catalogue stages stay
-//! unregistered and resolve to [`crate::catalogue::RuleState::Unsupported`].
+//! (TC-460), crawl-depth/orphan (TC-461), image/script/style (TC-462),
+//! hreflang/lang (TC-465) and duplicate-content (TC-466) checkers live here.
+//! Other catalogue stages stay unregistered and resolve to
+//! [`crate::catalogue::RuleState::Unsupported`].
 
+mod content;
 mod hreflang;
 mod indexability;
 mod links;
@@ -12,6 +14,10 @@ mod meta;
 mod navigation;
 mod resources;
 
+pub use content::{
+    DEFAULT_BOILERPLATE_MIN_PAGES, DEFAULT_MIN_MAIN_TOKENS, DEFAULT_NEAR_DUPLICATE_MAX_HAMMING,
+    content_registry, register_content,
+};
 pub use hreflang::{
     DEFAULT_MIN_LANGUAGE_CONFIDENCE, DEFAULT_MIN_LANGUAGE_HITS, hreflang_registry,
     register_hreflang,
@@ -45,5 +51,6 @@ pub fn audit_registry() -> Registry {
     register_navigation(&mut registry);
     register_resource_audit(&mut registry);
     register_hreflang(&mut registry);
+    register_content(&mut registry);
     registry
 }
