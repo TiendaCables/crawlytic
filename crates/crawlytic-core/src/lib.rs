@@ -37,7 +37,7 @@ pub use engine::{
 };
 pub use extract::{
     EXTRACTION_SCHEMA_VERSION, EmbeddedKind, ExtractHeader, ExtractInput, ExtractedObservations,
-    Heading, HostOwner, Hreflang, LinkObservation, ObservationFlags, PageObservation,
+    Heading, HostOwner, Hreflang, LinkObservation, ObservationFlags, PageObservation, RedirectHop,
     ResourceObservation, extract,
 };
 pub use profile::{
@@ -49,8 +49,11 @@ pub use robots::{
     RobotsRunMetadata, UrlAccess, evaluate_url, product_token,
 };
 pub use rules::{
-    DEFAULT_MAX_HTML_BYTES, DEFAULT_MAX_TITLE_CHARS, DEFAULT_MIN_TITLE_CHARS,
-    html_metadata_registry, normalize_meta, register_html_metadata,
+    DEFAULT_GENERIC_ANCHORS, DEFAULT_MAX_HTML_BYTES, DEFAULT_MAX_LINK_CHARS,
+    DEFAULT_MAX_ON_PAGE_LINKS, DEFAULT_MAX_QUERY_PARAMS, DEFAULT_MAX_REDIRECTS,
+    DEFAULT_MAX_TITLE_CHARS, DEFAULT_MAX_URL_CHARS, DEFAULT_MIN_TITLE_CHARS, audit_registry,
+    html_metadata_registry, link_audit_registry, normalize_meta, register_html_metadata,
+    register_link_audit,
 };
 pub use scope::{
     ClassifiedUrl, Coverage, CoverageLink, CoverageUrl, FetchIdentity, SKIP_MALFORMED,

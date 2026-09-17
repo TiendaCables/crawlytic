@@ -12,7 +12,7 @@ use crate::crawl::{
 };
 use crate::extract::{
     EmbeddedKind, ExtractedObservations, Heading, HostOwner, Hreflang, LinkObservation,
-    ObservationFlags, PageObservation, ResourceObservation,
+    ObservationFlags, PageObservation, RedirectHop, ResourceObservation,
 };
 use crate::profile::Profile;
 use crate::scope::{CoverageLink, CoverageUrl, FetchIdentity};
@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use url::Url;
 
-pub const STORE_SCHEMA_VERSION: i64 = 4;
+pub const STORE_SCHEMA_VERSION: i64 = 5;
 const DEFAULT_BATCH_SIZE: usize = 32;
 
 const MIGRATION_1: &str = "
@@ -286,6 +286,25 @@ const MIGRATION_4: &str = "
 ALTER TABLE page_observations ADD COLUMN charset_declared INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE page_observations ADD COLUMN has_frames INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE page_observations ADD COLUMN has_plugin_markup INTEGER NOT NULL DEFAULT 0;
+";
+
+const MIGRATION_5: &str = "
+CREATE TABLE observation_meta_refresh (
+    run_id INTEGER NOT NULL,
+    identity TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    text TEXT NOT NULL,
+    PRIMARY KEY (run_id, identity, seq)
+);
+CREATE TABLE observation_redirects (
+    run_id INTEGER NOT NULL,
+    identity TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    from_url TEXT NOT NULL,
+    to_url TEXT NOT NULL,
+    status INTEGER NOT NULL,
+    PRIMARY KEY (run_id, identity, seq)
+);
 ";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -820,6 +839,14 @@ impl Store {
                 params![run_id, identity],
             )?;
             conn.execute(
+                "DELETE FROM observation_meta_refresh WHERE run_id = ?1 AND identity = ?2",
+                params![run_id, identity],
+            )?;
+            conn.execute(
+                "DELETE FROM observation_redirects WHERE run_id = ?1 AND identity = ?2",
+                params![run_id, identity],
+            )?;
+            conn.execute(
                 "DELETE FROM link_observations WHERE run_id = ?1 AND source = ?2",
                 params![run_id, identity],
             )?;
@@ -917,6 +944,27 @@ impl Store {
                 identity,
                 &page.canonicals,
             )?;
+            insert_strings(
+                conn,
+                "observation_meta_refresh",
+                run_id,
+                identity,
+                &page.meta_refresh,
+            )?;
+            for (seq, hop) in observation.redirect_chain.iter().enumerate() {
+                conn.execute(
+                    "INSERT INTO observation_redirects(run_id, identity, seq, from_url, to_url, status)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        run_id,
+                        identity,
+                        seq as i64,
+                        hop.from,
+                        hop.to,
+                        hop.status
+                    ],
+                )?;
+            }
             for (seq, item) in page.hreflangs.iter().enumerate() {
                 conn.execute(
                     "INSERT INTO observation_hreflangs(run_id, identity, seq, lang, href)
@@ -1274,6 +1322,16 @@ fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
             params![4, now_secs()],
         )
         .map_err(|err| StoreError::migration(err.to_string()))?;
+        current = 4;
+    }
+    if current < 5 {
+        tx.execute_batch(MIGRATION_5)
+            .map_err(|err| StoreError::migration(err.to_string()))?;
+        tx.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (?1, ?2)",
+            params![5, now_secs()],
+        )
+        .map_err(|err| StoreError::migration(err.to_string()))?;
     }
     tx.commit()
         .map_err(|err| StoreError::migration(err.to_string()))?;
@@ -1519,6 +1577,7 @@ fn load_fetches(conn: &Connection, run_id: i64) -> Result<Vec<FetchRecord>, Stor
             duration_ms: 0,
             robots_tag_headers: Vec::new(),
             link_headers: Vec::new(),
+            redirect_chain: Vec::new(),
         });
     }
     Ok(fetches)
@@ -1785,10 +1844,17 @@ fn load_observations(
                 viewport,
                 has_frames: has_frames != 0,
                 has_plugin_markup: has_plugin_markup != 0,
+                meta_refresh: load_string_list(
+                    conn,
+                    "observation_meta_refresh",
+                    run_id,
+                    &identity,
+                )?,
                 text,
             },
             links: load_link_observations(conn, run_id, &identity)?,
             resources: load_resource_observations(conn, run_id, &identity)?,
+            redirect_chain: load_redirects(conn, run_id, &identity)?,
         });
     }
     Ok(observations)
@@ -1840,6 +1906,34 @@ fn load_hreflangs(
         items.push(Hreflang { lang, href });
     }
     Ok(items)
+}
+
+fn load_redirects(
+    conn: &Connection,
+    run_id: i64,
+    identity: &str,
+) -> Result<Vec<RedirectHop>, StoreError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT from_url, to_url, status FROM observation_redirects
+             WHERE run_id = ?1 AND identity = ?2 ORDER BY seq",
+        )
+        .map_err(map_write)?;
+    let rows = stmt
+        .query_map(params![run_id, identity], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, u16>(2)?,
+            ))
+        })
+        .map_err(map_write)?;
+    let mut hops = Vec::new();
+    for row in rows {
+        let (from, to, status) = row.map_err(map_write)?;
+        hops.push(RedirectHop { from, to, status });
+    }
+    Ok(hops)
 }
 
 fn load_link_observations(
@@ -2337,6 +2431,7 @@ mod tests {
             duration_ms: 0,
             robots_tag_headers: Vec::new(),
             link_headers: Vec::new(),
+            redirect_chain: Vec::new(),
         };
         store
             .upsert_fetch(run_id, &id, &record, Some(b"<html>"))

@@ -1056,7 +1056,7 @@ async fn persist_observation(
         name: "link",
         value,
     }));
-    let observation = extract(&ExtractInput {
+    let mut observation = extract(&ExtractInput {
         destination_url: identity.as_url(),
         status: record.status,
         content_type: &record.content_type,
@@ -1065,6 +1065,7 @@ async fn persist_observation(
         truncated: record.truncated,
         duration_ms: Some(record.duration_ms),
     });
+    observation.redirect_chain = record.redirect_chain.clone();
     let mut state = shared.lock().await;
     if let Some(session) = state.persist.clone()
         && let Err(err) = session.store.put_observation(session.run_id, &observation)
@@ -2552,6 +2553,7 @@ lists_complete = false
                         duration_ms: 0,
                         robots_tag_headers: Vec::new(),
                         link_headers: Vec::new(),
+                        redirect_chain: Vec::new(),
                     },
                     Some(b"<html>a</html>"),
                 )
