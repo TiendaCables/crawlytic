@@ -17,6 +17,25 @@ pub enum Severity {
     Notice,
 }
 
+impl Severity {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Error => "error",
+            Self::Warning => "warning",
+            Self::Notice => "notice",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "error" => Some(Self::Error),
+            "warning" => Some(Self::Warning),
+            "notice" => Some(Self::Notice),
+            _ => None,
+        }
+    }
+}
+
 /// Inventory unit as captured from the baseline UI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InventoryUnit {
@@ -99,6 +118,31 @@ pub enum RuleState {
     NotApplicable,
     Disabled,
     Unsupported,
+}
+
+impl RuleState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Passed => "passed",
+            Self::Findings => "findings",
+            Self::Incomplete => "incomplete",
+            Self::NotApplicable => "not_applicable",
+            Self::Disabled => "disabled",
+            Self::Unsupported => "unsupported",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "passed" => Some(Self::Passed),
+            "findings" => Some(Self::Findings),
+            "incomplete" => Some(Self::Incomplete),
+            "not_applicable" => Some(Self::NotApplicable),
+            "disabled" => Some(Self::Disabled),
+            "unsupported" => Some(Self::Unsupported),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

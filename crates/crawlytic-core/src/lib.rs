@@ -1,3 +1,4 @@
+mod audit;
 mod auth;
 mod catalogue;
 mod crawl;
@@ -10,6 +11,11 @@ mod scope;
 mod store;
 mod transport;
 
+pub use audit::{
+    AuditConfig, AuditReport, Checker, CheckerOutput, EvidenceBundle, EvidencePointer, Finding,
+    FindingDraft, FindingId, RULE_CONFIG_VERSION, Registry, RuleOutcome, Suppression,
+    SuppressionAction, SuppressionEvent, evaluate, evaluate_stored,
+};
 pub use auth::{
     CREDENTIAL_REPLACEMENT_PLAN, CRYPTO_VERIFICATION_LIMITATION, SignatureMetadata, WebBotAuth,
 };
