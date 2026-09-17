@@ -15,16 +15,22 @@ Shopify-generated `CRAWL_SIGNATURE`, `CRAWL_SIGNATURE_INPUT`, and `CRAWL_SIGNATU
 `.env` is loaded at launch. Quoted values keep embedded quotes after the outer quotes
 are stripped; exported environment variables override file values. Missing or invalid
 credentials produce errors that do not echo secret material. Avoid putting literal
-credentials in shell history.
+credentials in shell history. The Auth screen can also accept masked values into the
+process environment; they are never rendered unmasked, logged, or written to profiles
+or SQLite.
 
-Press `p` for a bounded signed sample (start URL, `/robots.txt`, `/sitemap.xml`),
-`q`/Escape/Ctrl-C to quit. Network work runs off the UI thread. No requests occur
-automatically. Signature, Signature-Input and Signature-Agent are attached only to
-the profile's HTTPS origin. Same-origin HTTPS redirects keep the headers; other
-origins and HTTP downgrades are refused and never receive credentials. Missing,
-malformed or expired credentials fail before a request is sent. There is no unsigned
-fallback. `CRAWL_SIGNATURE_AGENT` is sent as the `Signature-Agent` header. Shopify
-requires an sf-string, so a URI without quotes is wrapped as `"https://shopify.com"`.
+Keyboard: `1`–`5` or Tab cycle Profiles, Auth, Run, URL inventory and Findings; `/`
+filters; `j`/`k` move; `s` / Ctrl-S start a crawl; `x` / Ctrl-X cancel; `r` / Ctrl-R
+resume; `a` apply masked auth; `e`/`w` edit and write the selected profile; `?` help;
+`q`/Escape/Ctrl-C quit. Cancel, resume, filter, help and selection stay available while
+a crawl is running. Network work runs off the UI thread. No requests occur automatically.
+The terminal is restored on errors, panic and exit. Signature, Signature-Input and
+Signature-Agent are attached only to the profile's HTTPS origin. Same-origin HTTPS
+redirects keep the headers; other origins and HTTP downgrades are refused and never
+receive credentials. Missing, malformed or expired credentials fail before a request is
+sent. There is no unsigned fallback. `CRAWL_SIGNATURE_AGENT` is sent as the
+`Signature-Agent` header. Shopify requires an sf-string, so a URI without quotes is
+wrapped as `"https://shopify.com"`.
 `expires` in Signature-Input is treated as local expiry metadata; replace values in
 `.env` or the process environment, never in profiles.
 
@@ -49,8 +55,8 @@ locations are recorded and never receive credentials.
 
 ## Boundaries
 
-- `crawlytic-core`: profile, URL identity/scope, robots policy, Web Bot Auth transport, bounded crawl, homepage/sitemap discovery, SQLite run persistence, versioned page/link/resource extraction, evidence-based rule execution and finding lifecycle, HTML metadata, link/URL-shape, canonical/indexability, and crawl-depth/orphan checkers, and typed start/cancel/resume commands with coalesced progress events; no terminal dependency.
-- `crawlytic`: Ratatui rendering, key input and background-task coordination.
+- `crawlytic-core`: profile, URL identity/scope, robots policy, Web Bot Auth transport, bounded crawl, homepage/sitemap discovery, SQLite run persistence, versioned page/link/resource extraction, evidence-based rule execution and finding lifecycle, HTML metadata, link/URL-shape, canonical/indexability, crawl-depth/orphan and resource checkers, typed start/cancel/resume commands with coalesced progress events, and run listing for resume; no terminal dependency.
+- `crawlytic`: Ratatui rendering, key input, profile/auth screens, run/URL/finding investigation and background-task coordination.
 - Future interfaces can use the core without depending on Ratatui. The displayed user agent is the HTTP User-Agent string, not a browser viewport.
 
 Implemented: versioned TOML profiles (own-bot and comparison), prefix vs subfolder
@@ -120,8 +126,8 @@ Signature-Input values. Disk-full and migration failures are visible and leave t
 incomplete. Raw HTML retention is off by default and quota-bounded when enabled. An
 uncommitted writer batch (default 32 statements) can be lost on crash.
 
-Not implemented: remaining inventory checkers (images, resources, …), cross-run finding history,
-scheduling, credential editing/storage, mobile rendering or JS.
+Not implemented: remaining inventory checkers beyond the shipped HTML/link/indexability/navigation/resource set, cross-run finding history,
+scheduling, a credential vault (masked process-environment setup only), mobile rendering or JS.
 The page cap (20,000) and historical 3,725-page observation are not catalogue size.
 Weekly Monday is recorded without a time, timezone, or scheduler.
 A successful sample is not evidence that Shopify verified the signature, and the
@@ -155,7 +161,10 @@ cargo test --workspace
 ```
 
 Terminal smoke test on Arch Linux (interactive; `q` / Esc / Ctrl-C to quit).
-The TUI starts without sending requests. Press `p` only when you intend a live probe.
+The TUI starts without sending requests. Press `s` only when you intend a live crawl.
+Deterministic TUI fixtures cover keyboard navigation, filtering during a running session,
+masked credentials, small terminals, event floods, grouped findings with evidence/inlinks,
+and incomplete/unsupported checks without placeholder scores.
 
 ```sh
 cargo run -p crawlytic
@@ -190,7 +199,7 @@ target was not fetched. Crawl-depth fixtures cover diamond/cycle/disconnected sh
 canonical/asset/sitemap edges that never count as inbound, a reproducible homepage path in
 depth findings, and coverage-qualified sitemap orphan candidates. They do not contact the storefront.
 
-A user-reported or local `p` sample is operator evidence only. It is not recorded in
+A user-reported or local crawl is operator evidence only. It is not recorded in
 this repository, is not covered by the default `cargo test` run, and is not proof that
 Shopify accepted the signature or that a crawl is ready. Optional
 `cargo test -p crawlytic-core live_tiendacables -- --ignored` contacts the live origin
