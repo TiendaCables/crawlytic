@@ -8,7 +8,7 @@ use crate::catalogue::{
     CATALOGUE_VERSION, RuleState, Severity, StateInput, resolve_state, rule_by_id, rules,
 };
 use crate::crawl::{SitemapInventory, UrlRecord};
-use crate::extract::ExtractedObservations;
+use crate::extract::{ExtractedObservations, ResourceFetch};
 use crate::robots::RobotsRunMetadata;
 use crate::store::{Store, StoreError};
 use std::collections::BTreeMap;
@@ -78,6 +78,7 @@ pub struct EvidenceBundle<'a> {
     pub sitemap: Option<&'a SitemapInventory>,
     pub sitemap_done: bool,
     pub robots: Option<&'a RobotsRunMetadata>,
+    pub resource_fetches: &'a [ResourceFetch],
 }
 
 /// Stable identity: rule id plus affected entity. Config changes update the
@@ -375,6 +376,7 @@ pub fn evaluate_stored(
         sitemap: Some(&run.sitemap),
         sitemap_done: run.sitemap_done,
         robots: run.robots.as_ref(),
+        resource_fetches: &run.resource_fetches,
     };
     let report = evaluate(run_id, &evidence, config, registry, &suppressions);
     store.save_audit_report(&report)?;
@@ -658,6 +660,7 @@ mod tests {
                 sitemap: None,
                 sitemap_done: false,
                 robots: None,
+                resource_fetches: &[],
             },
             config,
             registry,

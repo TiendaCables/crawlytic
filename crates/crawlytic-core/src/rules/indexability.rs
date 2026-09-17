@@ -995,6 +995,7 @@ mod tests {
                 sitemap,
                 sitemap_done: sitemap.is_some(),
                 robots,
+                resource_fetches: &[],
             },
             &AuditConfig::default(),
             &indexability_registry(),

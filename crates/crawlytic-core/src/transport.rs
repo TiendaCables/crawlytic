@@ -1,10 +1,10 @@
 use crate::auth::{CRYPTO_VERIFICATION_LIMITATION, WebBotAuth};
-use crate::extract::RedirectHop;
+use crate::extract::{RedirectHop, ResourceFetch, looks_like_challenge};
 use crate::profile::Profile;
 use crate::robots::{RobotsFile, RobotsRunMetadata, UrlAccess};
 use anyhow::{Context, Result};
 use reqwest::{
-    Client, StatusCode,
+    Client, Method, StatusCode,
     header::{LOCATION, RETRY_AFTER},
     redirect::Policy,
 };
@@ -271,6 +271,141 @@ impl SignedTransport {
         }
     }
 
+    /// Unsigned HEAD, with GET fallback when HEAD is not allowed. Never attaches
+    /// Web Bot Auth headers and never counts as a page fetch.
+    pub async fn probe_asset(&self, url: &Url) -> ResourceFetch {
+        if url.scheme() != "https" {
+            return ResourceFetch {
+                identity: url.to_string(),
+                status: None,
+                failed_reason: Some(format!("Refused {url}")),
+                challenge: false,
+                credentials_attached: false,
+                robots_blocked: false,
+                robots_known: true,
+                content_type: String::new(),
+            };
+        }
+        match self.unsigned_exchange(url, true, 2048).await {
+            Ok((status, content_type, _body, challenge)) => ResourceFetch {
+                identity: url.to_string(),
+                status: Some(status),
+                failed_reason: None,
+                challenge,
+                credentials_attached: false,
+                robots_blocked: false,
+                robots_known: true,
+                content_type,
+            },
+            Err(err) => ResourceFetch {
+                identity: url.to_string(),
+                status: None,
+                failed_reason: Some(err.observation().to_owned()),
+                challenge: false,
+                credentials_attached: false,
+                robots_blocked: false,
+                robots_known: true,
+                content_type: String::new(),
+            },
+        }
+    }
+
+    pub(crate) async fn get_unsigned(
+        &self,
+        url: &Url,
+        max_bytes: usize,
+    ) -> std::result::Result<(u16, String, Vec<u8>), AccessError> {
+        let (status, content_type, body, _) = self.unsigned_exchange(url, false, max_bytes).await?;
+        Ok((status, content_type, body))
+    }
+
+    async fn unsigned_exchange(
+        &self,
+        url: &Url,
+        head_first: bool,
+        max_bytes: usize,
+    ) -> std::result::Result<(u16, String, Vec<u8>, bool), AccessError> {
+        if head_first {
+            match self.unsigned_follow(url, Method::HEAD, max_bytes).await {
+                Ok((405 | 501, _, _)) => {}
+                Ok((status, content_type, body)) => {
+                    return Ok((status, content_type, body, false));
+                }
+                Err(_) => {}
+            }
+        }
+        let (status, content_type, body) =
+            self.unsigned_follow(url, Method::GET, max_bytes).await?;
+        let challenge = looks_like_challenge(&String::from_utf8_lossy(&body));
+        Ok((status, content_type, body, challenge))
+    }
+
+    async fn unsigned_follow(
+        &self,
+        url: &Url,
+        method: Method,
+        max_bytes: usize,
+    ) -> std::result::Result<(u16, String, Vec<u8>), AccessError> {
+        let mut current = url.clone();
+        let mut redirects = 0;
+        loop {
+            if current.scheme() != "https" {
+                return Err(AccessError::with_cause(
+                    format!("Refused {current}"),
+                    "HTTPS to HTTP downgrade refused. Credentials were not attached.",
+                ));
+            }
+            let response = self.send_unsigned(&current, method.clone()).await?;
+            let status = response.status();
+            if status.is_redirection() {
+                let next = unsigned_redirect_target(&current, &response)?;
+                redirects += 1;
+                if redirects > MAX_REDIRECTS {
+                    return Err(AccessError::with_cause(
+                        format!(
+                            "HTTP {} from {current} exceeded the redirect limit",
+                            status.as_u16()
+                        ),
+                        "Redirect loop or chain stopped. Credentials were not attached.",
+                    ));
+                }
+                current = next;
+                continue;
+            }
+            let content_type = response
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_owned();
+            let (sample, _) = read_sample(response, max_bytes.max(1)).await?;
+            return Ok((status.as_u16(), content_type, sample));
+        }
+    }
+
+    async fn send_unsigned(
+        &self,
+        url: &Url,
+        method: Method,
+    ) -> std::result::Result<reqwest::Response, AccessError> {
+        for attempt in 0..=MAX_RETRIES {
+            match self
+                .client
+                .request(method.clone(), url.clone())
+                .send()
+                .await
+            {
+                Ok(response) => return Ok(response),
+                Err(_) if attempt < MAX_RETRIES => {}
+                Err(_) => break,
+            }
+        }
+        Err(AccessError::with_cause(
+            format!("Connection failed to {url}"),
+            "Check DNS, TLS and network access. Resource probes do not attach Shopify credentials.",
+        ))
+    }
+
     pub async fn sample_access(
         &self,
         profile: &Profile,
@@ -410,6 +545,36 @@ fn origin_path(start: &Url, path: &str) -> Url {
     url.set_query(None);
     url.set_fragment(None);
     url
+}
+
+fn unsigned_redirect_target(
+    from: &Url,
+    response: &reqwest::Response,
+) -> std::result::Result<Url, AccessError> {
+    let status = response.status().as_u16();
+    let Some(location) = response
+        .headers()
+        .get(LOCATION)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return Err(AccessError::with_cause(
+            format!("HTTP {status} from {from} without a usable Location header"),
+            "The redirect could not be followed. Credentials were not attached.",
+        ));
+    };
+    let next = from.join(location).map_err(|_| {
+        AccessError::with_cause(
+            format!("HTTP {status} from {from} with an unusable Location header"),
+            "The redirect could not be followed. Credentials were not attached.",
+        )
+    })?;
+    if next.scheme() != "https" {
+        return Err(AccessError::with_cause(
+            format!("HTTP {status} from {from} to {next}"),
+            "HTTPS to HTTP downgrade refused. Credentials were not attached.",
+        ));
+    }
+    Ok(next)
 }
 
 fn diagnose_status(
@@ -580,6 +745,7 @@ mod tests {
     struct Recorded {
         scheme: &'static str,
         host: String,
+        method: String,
         path: String,
         headers: HashMap<String, String>,
     }
@@ -809,11 +975,9 @@ mod tests {
         let text = String::from_utf8_lossy(&buf);
         let mut lines = text.split("\r\n");
         let request_line = lines.next().unwrap_or("");
-        let path = request_line
-            .split_whitespace()
-            .nth(1)
-            .unwrap_or("/")
-            .to_owned();
+        let mut parts = request_line.split_whitespace();
+        let method = parts.next().unwrap_or("GET").to_owned();
+        let path = parts.next().unwrap_or("/").to_owned();
         let mut headers = HashMap::new();
         let mut host = String::new();
         for line in lines {
@@ -832,6 +996,7 @@ mod tests {
         Ok(Recorded {
             scheme,
             host,
+            method,
             path,
             headers,
         })
@@ -1250,5 +1415,54 @@ lists_complete = false
         );
         assert!(!format!("{probe:?}").contains("sig1="));
         assert!(!format!("{probe:?}").contains("TESTSIGNATUREVALUE"));
+    }
+
+    #[tokio::test]
+    async fn asset_probe_is_unsigned_allows_other_hosts_and_falls_back_from_head() {
+        let approved = TestOrigin::https();
+        let other = TestOrigin::https();
+        approved.on("/local.png", 200, "image/png", "PNG");
+        other.on("/app.js", 405, "text/plain", "no");
+        other.on("/app.js", 200, "application/javascript", "ok");
+        other.on("/challenge.png", 405, "text/plain", "no");
+        other.on(
+            "/challenge.png",
+            200,
+            "text/html",
+            "<html><title>Just a moment...</title></html>",
+        );
+        let t = transport(&approved);
+        let local = t
+            .probe_asset(&origin_path(&approved.url(), "/local.png"))
+            .await;
+        assert_eq!(local.status, Some(200));
+        assert!(!local.credentials_attached);
+        let remote = t.probe_asset(&origin_path(&other.url(), "/app.js")).await;
+        assert_eq!(remote.status, Some(200));
+        assert!(!remote.credentials_attached);
+        let challenge = t
+            .probe_asset(&origin_path(&other.url(), "/challenge.png"))
+            .await;
+        assert!(challenge.challenge);
+        assert_eq!(challenge.status, Some(200));
+        let local_req = approved
+            .recorded()
+            .into_iter()
+            .find(|req| req.path == "/local.png")
+            .unwrap();
+        assert_eq!(local_req.method, "HEAD");
+        assert!(!local_req.headers.contains_key("signature"));
+        let remote_reqs: Vec<_> = other
+            .recorded()
+            .into_iter()
+            .filter(|req| req.path == "/app.js")
+            .collect();
+        assert_eq!(remote_reqs[0].method, "HEAD");
+        assert_eq!(remote_reqs[1].method, "GET");
+        assert!(
+            remote_reqs
+                .iter()
+                .all(|req| !req.headers.contains_key("signature"))
+        );
     }
 }

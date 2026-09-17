@@ -750,6 +750,7 @@ mod tests {
                 sitemap: None,
                 sitemap_done: false,
                 robots: None,
+                resource_fetches: &[],
             },
             &config(),
             &html_metadata_registry(),

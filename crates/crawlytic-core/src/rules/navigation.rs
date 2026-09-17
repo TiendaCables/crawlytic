@@ -573,6 +573,7 @@ mod tests {
             sitemap,
             sitemap_done,
             robots: None,
+            resource_fetches: &[],
         }
     }
 
