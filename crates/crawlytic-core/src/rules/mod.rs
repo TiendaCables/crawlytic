@@ -1,16 +1,21 @@
 //! Inventory checkers over stored observations.
 //!
 //! HTML metadata (TC-458), link/URL-shape (TC-459), canonical/indexability
-//! (TC-460), crawl-depth/orphan (TC-461) and image/script/style (TC-462)
-//! checkers live here. Other catalogue stages stay unregistered and resolve to
-//! [`crate::catalogue::RuleState::Unsupported`].
+//! (TC-460), crawl-depth/orphan (TC-461), image/script/style (TC-462) and
+//! hreflang/lang (TC-465) checkers live here. Other catalogue stages stay
+//! unregistered and resolve to [`crate::catalogue::RuleState::Unsupported`].
 
+mod hreflang;
 mod indexability;
 mod links;
 mod meta;
 mod navigation;
 mod resources;
 
+pub use hreflang::{
+    DEFAULT_MIN_LANGUAGE_CONFIDENCE, DEFAULT_MIN_LANGUAGE_HITS, hreflang_registry,
+    register_hreflang,
+};
 pub use indexability::{
     DEFAULT_MAX_SITEMAP_BYTES, DEFAULT_MAX_SITEMAP_URLS, indexability_registry,
     register_indexability,
@@ -39,5 +44,6 @@ pub fn audit_registry() -> Registry {
     register_indexability(&mut registry);
     register_navigation(&mut registry);
     register_resource_audit(&mut registry);
+    register_hreflang(&mut registry);
     registry
 }

@@ -55,7 +55,7 @@ locations are recorded and never receive credentials.
 
 ## Boundaries
 
-- `crawlytic-core`: profile, URL identity/scope, robots policy, Web Bot Auth transport, bounded crawl, homepage/sitemap discovery, SQLite run persistence, versioned page/link/resource extraction, evidence-based rule execution and finding lifecycle, HTML metadata, link/URL-shape, canonical/indexability, crawl-depth/orphan and resource checkers, typed start/cancel/resume commands with coalesced progress events, run listing for resume, CSV/JSON audit export, and a read-only generic CSV baseline importer; no terminal dependency.
+- `crawlytic-core`: profile, URL identity/scope, robots policy, Web Bot Auth transport, bounded crawl, homepage/sitemap discovery, SQLite run persistence, versioned page/link/resource extraction, evidence-based rule execution and finding lifecycle, HTML metadata, link/URL-shape, canonical/indexability, crawl-depth/orphan, resource and hreflang/lang checkers, typed start/cancel/resume commands with coalesced progress events, run listing for resume, CSV/JSON audit export, and a read-only generic CSV baseline importer; no terminal dependency.
 - `crawlytic`: Ratatui rendering, key input, profile/auth screens, run/URL/finding investigation and background-task coordination.
 - Future interfaces can use the core without depending on Ratatui. The displayed user agent is the HTTP User-Agent string, not a browser viewport.
 
@@ -114,8 +114,16 @@ click depth with a reproducible path, unique referring pages, one-inbound pages,
 URLs with no observed internal inbound link. Canonicals, assets and sitemap membership never
 create a navigation edge. Incomplete crawls label sitemap orphan *candidates* rather than
 definite site-wide orphans. `max_clicks` defaults to 3 (inventory baseline, not a Semrush
-formula). Other inventory checkers are not shipped; unregistered catalogue rules stay
-`unsupported`. Current 14
+formula). Hreflang checkers evaluate stored observations for BCP 47/`x-default` syntax, per-source
+language conflicts, target status, missing return links, missing self-references, and
+canonical/noindex inconsistency. Failed relationships attach source and target evidence.
+Missing hreflang on a single-language page with `html lang` is not an error; both lang and
+hreflang absent is a warning. Content-language disagreement is a Crawlytic stopword heuristic
+with confidence (`min_language_hits`, `min_language_confidence`), not a parser or Semrush
+formula. Cross-host locale targets are fetched once over unsigned HTTPS (or a separately
+authorized transport) and do not consume `max_pages` or receive Web Bot Auth headers; same-host
+unfetched targets stay `incomplete`. Other inventory checkers are not shipped; unregistered
+catalogue rules stay `unsupported`. Current 14
 September 2026 findings are stored separately from the historical "new issues" column.
 No-count rows are not failures. Evaluated runs export CSV and JSON with stable finding
 identities, severity, unit, URL, evidence, status and run coverage. Formula-leading cells
@@ -134,7 +142,7 @@ Signature-Input values. Disk-full and migration failures are visible and leave t
 incomplete. Raw HTML retention is off by default and quota-bounded when enabled. An
 uncommitted writer batch (default 32 statements) can be lost on crash.
 
-Not implemented: remaining inventory checkers beyond the shipped HTML/link/indexability/navigation/resource set, cross-run finding history,
+Not implemented: remaining inventory checkers beyond the shipped HTML/link/indexability/navigation/resource/hreflang set, cross-run finding history,
 scheduling, a credential vault (masked process-environment setup only), mobile rendering or JS.
 The page cap (20,000) and historical 3,725-page observation are not catalogue size.
 Weekly Monday is recorded without a time, timezone, or scheduler.
@@ -149,7 +157,7 @@ lists it as an ignored parameter. Path slash variants and query order stay disti
 
 ## Next milestones
 
-1. Remaining inventory checkers over stored observations (images, resources); then the broader Semrush catalogue.
+1. Remaining inventory checkers over stored observations; then the broader Semrush catalogue.
 2. Cross-run history and scheduled headless runs. A web UI can follow independently.
 
 Recorded TiendaCables settings: www.tiendacables.com; 20,000 page cap; 3,725-page
@@ -206,7 +214,10 @@ access limitation, content-type-based resources-as-page-links without Semrush pa
 >200 character baseline, quoted heuristic thresholds, and incomplete evidence when a
 target was not fetched. Crawl-depth fixtures cover diamond/cycle/disconnected shortest paths,
 canonical/asset/sitemap edges that never count as inbound, a reproducible homepage path in
-depth findings, and coverage-qualified sitemap orphan candidates. Export fixtures cover quotes, Unicode,
+depth findings, and coverage-qualified sitemap orphan candidates. Hreflang fixtures cover multi-locale
+and `x-default` clusters, absent return links, inaccessible targets, invalid BCP 47 tags, source
+conflicts, `html lang` without hreflang on a single-language page, content-language heuristic
+confidence, and unsigned cross-host locale fetches that never attach credentials. Export fixtures cover quotes, Unicode,
 formula injection, stable finding identities, coverage reconciliation, secret refusal, and
 read-only CSV import that separates aggregate counts from entity rows and historical deltas.
 The Semrush workbook adapter stays blocked without inspecting unsupplied XLSX bytes. They do not contact the storefront.
