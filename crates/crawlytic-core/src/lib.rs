@@ -4,6 +4,7 @@ mod catalogue;
 mod crawl;
 mod discovery;
 mod engine;
+mod exchange;
 mod extract;
 mod profile;
 mod robots;
@@ -34,6 +35,12 @@ pub use engine::{
     CommandHandle, CommandSendError, CrawlCommand, CrawlCounters, CrawlEvent,
     DISCRETE_EVENT_CAPACITY, Diagnostic, DiagnosticKind, DisplayedUserAgent, Engine, EngineConfig,
     FetchCompletion, ProgressSnapshot, SessionStatus, StatusEvent,
+};
+pub use exchange::{
+    BaselineImport, BaselineRow, BaselineRowKind, EXPECTED_SEMRUSH_EXPORT_NAME, ExchangeError,
+    ExchangeErrorKind, ExportCoverage, ExportDocument, ExportEvidence, ExportFinding,
+    ExportOutcome, FieldMap, WrittenExport, export_document, import_baseline, render_csv,
+    render_json, write_export,
 };
 pub use extract::{
     EXTRACTION_SCHEMA_VERSION, EmbeddedKind, ExtractHeader, ExtractInput, ExtractedObservations,

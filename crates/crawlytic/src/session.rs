@@ -1,7 +1,7 @@
 use crate::app::{Action, App, AuthField};
 use crawlytic_core::{
     AuditConfig, CrawlCommand, CrawlLimits, Engine, EngineConfig, SessionStatus, Store, WebBotAuth,
-    audit_registry, evaluate_stored,
+    audit_registry, evaluate_stored, export_document, write_export,
 };
 use std::path::Path;
 use std::time::Duration;
@@ -57,6 +57,7 @@ impl Session {
                     "Use s to start a crawl. Connection preflight is no longer a separate live result."
                         .into();
             }
+            Action::Export => self.export(app)?,
         }
         Ok(())
     }
@@ -165,6 +166,22 @@ impl Session {
         let text = app.profile.to_toml()?;
         std::fs::write(&file.path, text)?;
         app.message = format!("Wrote {}", file.name);
+        Ok(())
+    }
+
+    fn export(&self, app: &mut App) -> anyhow::Result<()> {
+        let Some(report) = app.last_report.as_ref() else {
+            app.message = "No run to export. Evaluate stored observations first.".into();
+            return Ok(());
+        };
+        let document = export_document(report, &app.urls)?;
+        let dir = std::env::current_dir()?;
+        let written = write_export(&dir, &document)?;
+        app.message = format!(
+            "Wrote {} and {}",
+            written.csv_path.display(),
+            written.json_path.display()
+        );
         Ok(())
     }
 

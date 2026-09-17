@@ -64,6 +64,24 @@ pub enum CoarseUnit {
 }
 
 impl InventoryUnit {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Page => "page",
+            Self::Link => "link",
+            Self::Resource => "resource",
+            Self::Site => "site",
+            Self::Image => "image",
+            Self::File => "file",
+            Self::Url => "url",
+            Self::Issue => "issue",
+            Self::Conflict => "conflict",
+            Self::AmpPage => "amp_page",
+            Self::Subdomain => "subdomain",
+            Self::Item => "item",
+            Self::Unspecified => "unspecified",
+        }
+    }
+
     pub fn coarse(self) -> CoarseUnit {
         match self {
             Self::Page | Self::AmpPage => CoarseUnit::Page,
