@@ -346,6 +346,7 @@ pub fn evaluate(
             .any(|suppression| suppression.matches(&finding.id.rule_id, &finding.id.entity_key));
     }
     findings.sort_by(|a, b| a.id.cmp(&b.id));
+    findings.dedup_by(|left, right| left.id == right.id);
 
     let outcomes = states
         .into_iter()
@@ -854,6 +855,53 @@ mod tests {
         assert!(finding.recommendation.contains("40"));
         assert_eq!(finding.severity, Severity::Warning);
         assert_ne!(findings.config_fingerprint, passed.config_fingerprint);
+    }
+
+    struct DuplicateEntity;
+
+    impl Checker for DuplicateEntity {
+        fn rule_id(&self) -> &'static str {
+            "meta.missing_title"
+        }
+
+        fn evaluate(&self, evidence: &EvidenceBundle<'_>, _config: &AuditConfig) -> CheckerOutput {
+            let Some(observation) = evidence.observations.first() else {
+                return CheckerOutput {
+                    applicable: true,
+                    evidence_complete: false,
+                    findings: Vec::new(),
+                };
+            };
+            let draft = FindingDraft {
+                entity_key: observation.identity.clone(),
+                fact: "Duplicate entity fixture.".into(),
+                recommendation: "Keep one finding identity per entity.".into(),
+                evidence: vec![EvidencePointer {
+                    observation_identity: observation.identity.clone(),
+                    field: "title".into(),
+                    excerpt: "dup".into(),
+                }],
+            };
+            CheckerOutput {
+                applicable: true,
+                evidence_complete: true,
+                findings: vec![draft.clone(), draft],
+            }
+        }
+    }
+
+    #[test]
+    fn duplicate_finding_identities_persist_once() {
+        let path = temp_path();
+        let store = Store::open(&path).unwrap();
+        let run_id = store.begin_run(&sample_profile()).unwrap();
+        store.put_observation(run_id, &untitled()).unwrap();
+        let mut registry = Registry::new();
+        registry.register(DuplicateEntity);
+        let report = evaluate_stored(&store, run_id, &AuditConfig::default(), &registry)
+            .expect("duplicate finding identities must not fail UNIQUE");
+        assert_eq!(report.findings_for("meta.missing_title").count(), 1);
+        cleanup(&path);
     }
 
     #[test]

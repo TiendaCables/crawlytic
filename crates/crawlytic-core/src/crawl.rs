@@ -117,6 +117,9 @@ impl Default for CancelHandle {
     }
 }
 
+/// HTML sample bound. 64 KiB truncates real storefront homepages.
+pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 1_048_576;
+
 #[derive(Clone, Debug)]
 pub struct CrawlLimits {
     pub max_urls: usize,
@@ -138,7 +141,7 @@ impl CrawlLimits {
         Self {
             max_urls: profile.max_pages,
             max_queue: 1024,
-            max_response_bytes: 65_536,
+            max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
             max_sitemap_bytes: 1_048_576,
             max_sitemap_depth: 4,
             max_sitemap_files: 64,
@@ -2208,6 +2211,18 @@ lists_complete = false
             &Profile::load(include_str!("../../../profile.example.toml")).unwrap(),
         )
         .deterministic()
+    }
+
+    #[test]
+    fn default_html_sample_fits_a_storefront_homepage() {
+        let limits = CrawlLimits::from_profile(
+            &Profile::load(include_str!("../../../profile.example.toml")).unwrap(),
+        );
+        assert_eq!(limits.max_response_bytes, DEFAULT_MAX_RESPONSE_BYTES);
+        assert_eq!(
+            DEFAULT_MAX_RESPONSE_BYTES, 1_048_576,
+            "64 KiB truncates real storefront homepages and blocks link discovery"
+        );
     }
 
     fn crawler_with(origin: &TestOrigin, limits: CrawlLimits, cancel: CancelHandle) -> Crawler {

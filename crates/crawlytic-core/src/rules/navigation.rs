@@ -408,8 +408,15 @@ impl Checker for OrphansInSitemaps {
         let graph = build_navigation_graph(evidence);
         let homepage = graph.homepage.as_deref();
         let incomplete_coverage = coverage_incomplete(evidence);
-        let mut findings = Vec::new();
+        let mut candidates: BTreeMap<String, String> = BTreeMap::new();
         for listed in &sitemap.urls {
+            if listed
+                .skip_reason
+                .as_deref()
+                .is_some_and(|reason| !reason.is_empty())
+            {
+                continue;
+            }
             let Some(identity) = listed.identity.as_ref() else {
                 continue;
             };
@@ -424,34 +431,50 @@ impl Checker for OrphansInSitemaps {
             if inbound > 0 {
                 continue;
             }
-            let (fact, recommendation) = if incomplete_coverage {
-                (
-                    format!(
-                        "{identity} is an orphan candidate listed in {} with no observed internal inbound link; crawl coverage is incomplete, so this is not a definite site-wide orphan.",
-                        listed.source_sitemap
-                    ),
-                    "Treat this as a coverage-qualified candidate until the crawl finishes, then confirm whether internal links exist.".to_owned(),
-                )
+            candidates
+                .entry(identity)
+                .or_insert_with(|| listed.source_sitemap.clone());
+        }
+        if incomplete_coverage {
+            if candidates.is_empty() {
+                return complete(Vec::new());
+            }
+            let n = candidates.len();
+            let noun = if n == 1 {
+                "sitemap URL has"
             } else {
-                (
-                    format!(
-                        "{identity} is listed in {} with no observed internal inbound link.",
-                        listed.source_sitemap
-                    ),
-                    "Add an internal navigational link if the sitemap URL should be reachable from the site.".to_owned(),
-                )
+                "sitemap URLs have"
             };
-            findings.push(FindingDraft {
+            let home = homepage.unwrap_or("sitemap").to_owned();
+            let sources: BTreeSet<&str> = candidates.values().map(String::as_str).collect();
+            return complete(vec![FindingDraft {
+                entity_key: format!("{home} sitemap-orphan-candidates"),
+                fact: format!(
+                    "{n} {noun} no observed internal inbound link; crawl coverage is incomplete, so these are not a definite site-wide orphan."
+                ),
+                recommendation: "Finish the crawl, then confirm whether internal links exist. These are coverage-qualified candidates, not definite site-wide orphans.".into(),
+                evidence: vec![pointer(
+                    home,
+                    "sitemap_url",
+                    format!("candidates={n}; sources={}", sources.into_iter().collect::<Vec<_>>().join(" | ")),
+                )],
+            }]);
+        }
+        let findings = candidates
+            .into_iter()
+            .map(|(identity, source)| FindingDraft {
                 entity_key: identity.clone(),
-                fact,
-                recommendation,
+                fact: format!(
+                    "{identity} is listed in {source} with no observed internal inbound link."
+                ),
+                recommendation: "Add an internal navigational link if the sitemap URL should be reachable from the site.".into(),
                 evidence: vec![pointer(
                     identity,
                     "sitemap_url",
-                    format!("source={}", listed.source_sitemap),
+                    format!("source={source}"),
                 )],
-            });
-        }
+            })
+            .collect();
         complete(findings)
     }
 }
@@ -936,13 +959,75 @@ mod tests {
             .unwrap()
             .fact
             .clone();
-        assert!(fact.contains("orphan candidate"));
+        assert!(fact.contains("orphan candidate") || fact.contains("coverage is incomplete"));
         assert!(fact.contains("not a definite site-wide orphan"));
+        assert_eq!(
+            candidate.findings_for("crawl.orphans_in_sitemaps").count(),
+            1,
+            "incomplete coverage must not explode into one finding per sitemap URL"
+        );
         assert_eq!(
             run(&obs, &urls, None, true, &AuditConfig::default())
                 .outcome("crawl.orphans_in_sitemaps"),
             Some(RuleState::Incomplete)
         );
+    }
+
+    #[test]
+    fn duplicate_and_out_of_scope_sitemap_urls_do_not_multiply_orphans() {
+        let obs = [links(
+            "https://audit.example/",
+            &["https://audit.example/one"],
+        )];
+        let urls = home_urls(&[url_rec(
+            "https://audit.example/one",
+            Some(1),
+            true,
+            false,
+            UrlState::Fetched,
+        )]);
+        let mut listed = vec![
+            sitemap_url(
+                "https://audit.example/orphan",
+                "https://audit.example/sitemap.xml",
+            ),
+            sitemap_url(
+                "https://audit.example/orphan",
+                "https://audit.example/sitemap-images.xml",
+            ),
+            sitemap_url(
+                "https://cdn.audit.example/hero.png",
+                "https://audit.example/sitemap-images.xml",
+            ),
+        ];
+        listed[2].skip_reason = Some("Outside configured origin".into());
+        let inventory = sitemap(&listed);
+        let report = run(&obs, &urls, Some(&inventory), true, &AuditConfig::default());
+        let orphans: Vec<_> = report.findings_for("crawl.orphans_in_sitemaps").collect();
+        assert_eq!(orphans.len(), 1, "{orphans:?}");
+        assert_eq!(orphans[0].id.entity_key, "https://audit.example/orphan");
+        assert!(
+            orphans
+                .iter()
+                .all(|finding| !finding.id.entity_key.contains("cdn.audit.example"))
+        );
+
+        let store = Store::open_in_memory().unwrap();
+        let profile = Profile::load(include_str!("../../../../profile.example.toml")).unwrap();
+        let run_id = store.begin_run(&profile).unwrap();
+        store.put_observation(run_id, &obs[0]).unwrap();
+        store.upsert_url(run_id, &urls[0]).unwrap();
+        store.upsert_url(run_id, &urls[1]).unwrap();
+        store.save_sitemap(run_id, &inventory).unwrap();
+        store.mark_sitemap_done(run_id).unwrap();
+        let stored = evaluate_stored(
+            &store,
+            run_id,
+            &AuditConfig::default(),
+            &navigation_registry(),
+        )
+        .expect("duplicate sitemap identities must persist");
+        assert_eq!(stored.findings_for("crawl.orphans_in_sitemaps").count(), 1);
     }
 
     #[test]

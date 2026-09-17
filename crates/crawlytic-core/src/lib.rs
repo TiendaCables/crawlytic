@@ -28,8 +28,8 @@ pub use catalogue::{
     new_issues_examples, resolve_state, rule_by_id, rules,
 };
 pub use crawl::{
-    CancelHandle, CrawlLimits, CrawlReport, Crawler, SitemapFileRecord, SitemapFileState,
-    SitemapInventory, SitemapUrlRecord, UrlRecord, UrlState,
+    CancelHandle, CrawlLimits, CrawlReport, Crawler, DEFAULT_MAX_RESPONSE_BYTES, SitemapFileRecord,
+    SitemapFileState, SitemapInventory, SitemapUrlRecord, UrlRecord, UrlState,
 };
 pub use engine::{
     CommandHandle, CommandSendError, CrawlCommand, CrawlCounters, CrawlEvent,

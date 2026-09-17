@@ -67,7 +67,7 @@ headers, same-origin HTTPS redirects, one connection retry, Signature-Input expi
 metadata, 401/403/429 diagnostics that separate observation from suspected cause,
 HTTP/TLS fixtures for header destinations, robots access policy as a separate layer
 (user-agent groups, wildcards, encodings, failed fetches, sitemap declarations),
-bounded signed sample of page/robots/sitemap, responsive terminal status, versioned
+bounded signed sample of page (1 MiB HTML), robots and sitemap, responsive terminal status, versioned
 rule catalogue v1 (97 transcribed checks plus limited AMP remainder, fixture contract,
 six result states), bounded async crawl (frontier, worker pool, per-origin pace for
 `crawl_delay = minimum`, independent URL/queue/response-size caps, 429/503 Retry-After
@@ -112,8 +112,9 @@ character page-URL threshold is the inventory baseline. Unfetched link targets s
 never `passed`. Crawl-depth checkers build a directed homepage `<a href>` graph: shortest-path
 click depth with a reproducible path, unique referring pages, one-inbound pages, and sitemap
 URLs with no observed internal inbound link. Canonicals, assets and sitemap membership never
-create a navigation edge. Incomplete crawls label sitemap orphan *candidates* rather than
-definite site-wide orphans. `max_clicks` defaults to 3 (inventory baseline, not a Semrush
+create a navigation edge. Incomplete crawls record one coverage-qualified sitemap orphan
+*candidate* summary rather than one row per unfetched sitemap URL. Out-of-scope sitemap
+entries are skipped. Duplicate listings share one identity. `max_clicks` defaults to 3 (inventory baseline, not a Semrush
 formula). Hreflang checkers evaluate stored observations for BCP 47/`x-default` syntax, per-source
 language conflicts, target status, missing return links, missing self-references, and
 canonical/noindex inconsistency. Failed relationships attach source and target evidence.
@@ -225,7 +226,7 @@ access limitation, content-type-based resources-as-page-links without Semrush pa
 >200 character baseline, quoted heuristic thresholds, and incomplete evidence when a
 target was not fetched. Crawl-depth fixtures cover diamond/cycle/disconnected shortest paths,
 canonical/asset/sitemap edges that never count as inbound, a reproducible homepage path in
-depth findings, and coverage-qualified sitemap orphan candidates. Hreflang fixtures cover multi-locale
+depth findings, coverage-qualified sitemap orphan summaries, and duplicate/out-of-scope sitemap URLs that do not multiply findings. Hreflang fixtures cover multi-locale
 and `x-default` clusters, absent return links, inaccessible targets, invalid BCP 47 tags, source
 conflicts, `html lang` without hreflang on a single-language page, content-language heuristic
 confidence, and unsigned cross-host locale fetches that never attach credentials. Structured-data fixtures cover JSON-LD arrays and `@graph`, multiple offers, malformed JSON, missing required properties, Microdata/RDFa inventory that does not pass, unsupported types, and recommendations that do not promise Google rich results or appearance. Export fixtures cover quotes, Unicode,

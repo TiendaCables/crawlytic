@@ -2603,7 +2603,11 @@ fn persist_audit_report(conn: &Connection, report: &AuditReport) -> rusqlite::Re
             ],
         )?;
     }
+    let mut seen_findings = std::collections::BTreeSet::new();
     for finding in &report.findings {
+        if !seen_findings.insert((finding.id.rule_id.as_str(), finding.id.entity_key.as_str())) {
+            continue;
+        }
         conn.execute(
             "INSERT INTO findings(
                 run_id, rule_id, entity_key, evidence, fact, recommendation,

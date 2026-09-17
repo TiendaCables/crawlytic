@@ -131,7 +131,7 @@ pub struct ProfileFile {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FindingsCursor {
     Finding {
         severity: usize,
