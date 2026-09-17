@@ -5,6 +5,7 @@
 //! quota-bounded. Writer statements share a transaction until the batch limit
 //! is reached or `flush` is called.
 
+use crate::audit::{AuditReport, Suppression, SuppressionAction, SuppressionEvent};
 use crate::catalogue::{CATALOGUE_VERSION, FIXTURE_CONTRACT_VERSION};
 use crate::crawl::{
     SitemapFileRecord, SitemapFileState, SitemapInventory, SitemapUrlRecord, UrlRecord, UrlState,
@@ -23,7 +24,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use url::Url;
 
-pub const STORE_SCHEMA_VERSION: i64 = 2;
+pub const STORE_SCHEMA_VERSION: i64 = 3;
 const DEFAULT_BATCH_SIZE: usize = 32;
 
 const MIGRATION_1: &str = "
@@ -229,6 +230,58 @@ CREATE TABLE resource_observations (
 );
 ";
 
+const MIGRATION_3: &str = "
+ALTER TABLE findings ADD COLUMN fact TEXT NOT NULL DEFAULT '';
+ALTER TABLE findings ADD COLUMN recommendation TEXT NOT NULL DEFAULT '';
+ALTER TABLE findings ADD COLUMN severity TEXT NOT NULL DEFAULT 'notice';
+ALTER TABLE findings ADD COLUMN state TEXT NOT NULL DEFAULT 'findings';
+ALTER TABLE findings ADD COLUMN config_version INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE findings ADD COLUMN catalogue_version INTEGER NOT NULL DEFAULT 1;
+UPDATE findings SET fact = evidence WHERE fact = '';
+CREATE TABLE finding_evidence (
+    run_id INTEGER NOT NULL,
+    rule_id TEXT NOT NULL,
+    entity_key TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    observation_identity TEXT NOT NULL,
+    field TEXT NOT NULL,
+    excerpt TEXT NOT NULL,
+    PRIMARY KEY (run_id, rule_id, entity_key, seq),
+    FOREIGN KEY (run_id, rule_id, entity_key) REFERENCES findings(run_id, rule_id, entity_key) ON DELETE CASCADE
+);
+CREATE TABLE rule_outcomes (
+    run_id INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    rule_id TEXT NOT NULL,
+    state TEXT NOT NULL,
+    config_version INTEGER NOT NULL,
+    PRIMARY KEY (run_id, rule_id)
+);
+CREATE TABLE suppressions (
+    id INTEGER PRIMARY KEY,
+    run_id INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    rule_id TEXT,
+    entity_key TEXT,
+    reason TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    revoked_at INTEGER
+);
+CREATE TABLE suppression_events (
+    id INTEGER PRIMARY KEY,
+    suppression_id INTEGER NOT NULL REFERENCES suppressions(id) ON DELETE CASCADE,
+    action TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    at INTEGER NOT NULL
+);
+CREATE TABLE audit_evaluations (
+    run_id INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    seq INTEGER NOT NULL,
+    evaluated_at INTEGER NOT NULL,
+    config_version INTEGER NOT NULL,
+    config_fingerprint TEXT NOT NULL,
+    PRIMARY KEY (run_id, seq)
+);
+";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StoreErrorKind {
     DiskFull,
@@ -343,6 +396,12 @@ pub struct FindingRecord {
     pub rule_id: String,
     pub entity_key: String,
     pub evidence: String,
+    pub fact: String,
+    pub recommendation: String,
+    pub severity: String,
+    pub state: String,
+    pub config_version: u32,
+    pub catalogue_version: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -913,9 +972,11 @@ impl Store {
         let mut inner = self.lock();
         inner.write(|conn| {
             conn.execute(
-                "INSERT OR IGNORE INTO findings(run_id, rule_id, entity_key, evidence)
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![run_id, rule_id, entity_key, evidence],
+                "INSERT OR IGNORE INTO findings(
+                    run_id, rule_id, entity_key, evidence, fact, recommendation,
+                    severity, state, config_version, catalogue_version
+                 ) VALUES (?1, ?2, ?3, ?4, ?4, '', 'notice', 'findings', 1, ?5)",
+                params![run_id, rule_id, entity_key, evidence, CATALOGUE_VERSION],
             )?;
             Ok(())
         })?;
@@ -924,6 +985,86 @@ impl Store {
 
     pub fn findings(&self, run_id: i64) -> Result<Vec<FindingRecord>, StoreError> {
         self.load_run(run_id).map(|run| run.findings)
+    }
+
+    pub fn save_audit_report(&self, report: &AuditReport) -> Result<(), StoreError> {
+        let mut inner = self.lock();
+        inner.write(|conn| persist_audit_report(conn, report))?;
+        inner.commit()?;
+        Ok(())
+    }
+
+    pub fn apply_suppression(
+        &self,
+        run_id: i64,
+        rule_id: Option<&str>,
+        entity_key: Option<&str>,
+        reason: &str,
+    ) -> Result<i64, StoreError> {
+        if reason.trim().is_empty() {
+            return Err(StoreError::other("Suppression reason is required"));
+        }
+        if rule_id.is_none() && entity_key.is_none() {
+            return Err(StoreError::other(
+                "Suppression must name a rule, an entity, or both",
+            ));
+        }
+        let mut inner = self.lock();
+        let now = now_secs();
+        inner
+            .write(|conn| {
+                conn.execute(
+                    "INSERT INTO suppressions(run_id, rule_id, entity_key, reason, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![run_id, rule_id, entity_key, reason, now],
+                )?;
+                let id = conn.last_insert_rowid();
+                conn.execute(
+                    "INSERT INTO suppression_events(suppression_id, action, reason, at)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![id, SuppressionAction::Apply.as_str(), reason, now],
+                )?;
+                Ok(id)
+            })
+            .and_then(|id| {
+                inner.commit()?;
+                Ok(id)
+            })
+    }
+
+    pub fn revoke_suppression(&self, id: i64, reason: &str) -> Result<(), StoreError> {
+        if reason.trim().is_empty() {
+            return Err(StoreError::other("Suppression reason is required"));
+        }
+        let mut inner = self.lock();
+        let now = now_secs();
+        inner.write(|conn| {
+            let updated = conn.execute(
+                "UPDATE suppressions SET revoked_at = ?2 WHERE id = ?1 AND revoked_at IS NULL",
+                params![id, now],
+            )?;
+            if updated == 0 {
+                return Err(rusqlite::Error::QueryReturnedNoRows);
+            }
+            conn.execute(
+                "INSERT INTO suppression_events(suppression_id, action, reason, at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![id, SuppressionAction::Revoke.as_str(), reason, now],
+            )?;
+            Ok(())
+        })?;
+        inner.commit()?;
+        Ok(())
+    }
+
+    pub fn suppressions(&self, run_id: i64) -> Result<Vec<Suppression>, StoreError> {
+        let inner = self.lock();
+        load_suppressions(&inner.conn, run_id)
+    }
+
+    pub fn suppression_events(&self, run_id: i64) -> Result<Vec<SuppressionEvent>, StoreError> {
+        let inner = self.lock();
+        load_suppression_events(&inner.conn, run_id)
     }
 
     pub fn mark_incomplete(&self, run_id: i64, error: &str) -> Result<(), StoreError> {
@@ -1099,6 +1240,16 @@ fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
         tx.execute(
             "INSERT INTO schema_migrations(version, applied_at) VALUES (?1, ?2)",
             params![2, now_secs()],
+        )
+        .map_err(|err| StoreError::migration(err.to_string()))?;
+        current = 2;
+    }
+    if current < 3 {
+        tx.execute_batch(MIGRATION_3)
+            .map_err(|err| StoreError::migration(err.to_string()))?;
+        tx.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (?1, ?2)",
+            params![3, now_secs()],
         )
         .map_err(|err| StoreError::migration(err.to_string()))?;
     }
@@ -1440,7 +1591,9 @@ fn load_sitemap(conn: &Connection, run_id: i64) -> Result<SitemapInventory, Stor
 fn load_findings(conn: &Connection, run_id: i64) -> Result<Vec<FindingRecord>, StoreError> {
     let mut stmt = conn
         .prepare(
-            "SELECT rule_id, entity_key, evidence FROM findings
+            "SELECT rule_id, entity_key, evidence, fact, recommendation, severity, state,
+                    config_version, catalogue_version
+             FROM findings
              WHERE run_id = ?1 ORDER BY rule_id, entity_key",
         )
         .map_err(map_write)?;
@@ -1450,6 +1603,12 @@ fn load_findings(conn: &Connection, run_id: i64) -> Result<Vec<FindingRecord>, S
                 rule_id: row.get(0)?,
                 entity_key: row.get(1)?,
                 evidence: row.get(2)?,
+                fact: row.get(3)?,
+                recommendation: row.get(4)?,
+                severity: row.get(5)?,
+                state: row.get(6)?,
+                config_version: row.get::<_, i64>(7)? as u32,
+                catalogue_version: row.get::<_, i64>(8)? as u32,
             })
         })
         .map_err(map_write)?;
@@ -1854,6 +2013,155 @@ fn now_secs() -> i64 {
 
 fn is_disk_full(err: &rusqlite::Error) -> bool {
     err.sqlite_error_code() == Some(rusqlite::ErrorCode::DiskFull)
+}
+
+fn persist_audit_report(conn: &Connection, report: &AuditReport) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM rule_outcomes WHERE run_id = ?1",
+        params![report.run_id],
+    )?;
+    for outcome in &report.outcomes {
+        conn.execute(
+            "DELETE FROM finding_evidence WHERE run_id = ?1 AND rule_id = ?2",
+            params![report.run_id, outcome.rule_id],
+        )?;
+        conn.execute(
+            "DELETE FROM findings WHERE run_id = ?1 AND rule_id = ?2",
+            params![report.run_id, outcome.rule_id],
+        )?;
+        conn.execute(
+            "INSERT INTO rule_outcomes(run_id, rule_id, state, config_version)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                report.run_id,
+                outcome.rule_id,
+                outcome.state.as_str(),
+                report.config_version as i64,
+            ],
+        )?;
+    }
+    for finding in &report.findings {
+        conn.execute(
+            "INSERT INTO findings(
+                run_id, rule_id, entity_key, evidence, fact, recommendation,
+                severity, state, config_version, catalogue_version
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                report.run_id,
+                finding.id.rule_id,
+                finding.id.entity_key,
+                finding.fact,
+                finding.fact,
+                finding.recommendation,
+                finding.severity.as_str(),
+                finding.state.as_str(),
+                finding.config_version as i64,
+                finding.catalogue_version as i64,
+            ],
+        )?;
+        for (seq, pointer) in finding.evidence.iter().enumerate() {
+            conn.execute(
+                "INSERT INTO finding_evidence(
+                    run_id, rule_id, entity_key, seq, observation_identity, field, excerpt
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    report.run_id,
+                    finding.id.rule_id,
+                    finding.id.entity_key,
+                    seq as i64,
+                    pointer.observation_identity,
+                    pointer.field,
+                    pointer.excerpt,
+                ],
+            )?;
+        }
+    }
+    let seq: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(seq), -1) + 1 FROM audit_evaluations WHERE run_id = ?1",
+        params![report.run_id],
+        |row| row.get(0),
+    )?;
+    conn.execute(
+        "INSERT INTO audit_evaluations(
+            run_id, seq, evaluated_at, config_version, config_fingerprint
+         ) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            report.run_id,
+            seq,
+            now_secs(),
+            report.config_version as i64,
+            report.config_fingerprint,
+        ],
+    )?;
+    Ok(())
+}
+
+fn load_suppressions(conn: &Connection, run_id: i64) -> Result<Vec<Suppression>, StoreError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, run_id, rule_id, entity_key, reason, created_at, revoked_at
+             FROM suppressions WHERE run_id = ?1 ORDER BY id",
+        )
+        .map_err(map_write)?;
+    let rows = stmt
+        .query_map(params![run_id], |row| {
+            Ok(Suppression {
+                id: row.get(0)?,
+                run_id: row.get(1)?,
+                rule_id: row.get(2)?,
+                entity_key: row.get(3)?,
+                reason: row.get(4)?,
+                created_at: row.get(5)?,
+                revoked_at: row.get(6)?,
+            })
+        })
+        .map_err(map_write)?;
+    let mut suppressions = Vec::new();
+    for row in rows {
+        suppressions.push(row.map_err(map_write)?);
+    }
+    Ok(suppressions)
+}
+
+fn load_suppression_events(
+    conn: &Connection,
+    run_id: i64,
+) -> Result<Vec<SuppressionEvent>, StoreError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT e.id, e.suppression_id, e.action, e.reason, e.at
+             FROM suppression_events e
+             JOIN suppressions s ON s.id = e.suppression_id
+             WHERE s.run_id = ?1
+             ORDER BY e.id",
+        )
+        .map_err(map_write)?;
+    let rows = stmt
+        .query_map(params![run_id], |row| {
+            let action: String = row.get(2)?;
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                action,
+                row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)?,
+            ))
+        })
+        .map_err(map_write)?;
+    let mut events = Vec::new();
+    for row in rows {
+        let (id, suppression_id, action, reason, at) = row.map_err(map_write)?;
+        let action = SuppressionAction::parse(&action)
+            .ok_or_else(|| StoreError::other(format!("Unknown suppression action {action}")))?;
+        events.push(SuppressionEvent {
+            id,
+            suppression_id,
+            action,
+            reason,
+            at,
+        });
+    }
+    Ok(events)
 }
 
 fn map_write(err: rusqlite::Error) -> StoreError {

@@ -49,7 +49,7 @@ locations are recorded and never receive credentials.
 
 ## Boundaries
 
-- `crawlytic-core`: profile, URL identity/scope, robots policy, Web Bot Auth transport, bounded crawl, homepage/sitemap discovery, SQLite run persistence, versioned page/link/resource extraction, and typed start/cancel/resume commands with coalesced progress events; no terminal dependency.
+- `crawlytic-core`: profile, URL identity/scope, robots policy, Web Bot Auth transport, bounded crawl, homepage/sitemap discovery, SQLite run persistence, versioned page/link/resource extraction, evidence-based rule execution and finding lifecycle, and typed start/cancel/resume commands with coalesced progress events; no terminal dependency.
 - `crawlytic`: Ratatui rendering, key input and background-task coordination.
 - Future interfaces can use the core without depending on Ratatui. The displayed user agent is the HTTP User-Agent string, not a browser viewport.
 
@@ -80,8 +80,12 @@ commands (start, cancel, resume) and coalesced progress events (run status, coun
 fetch completion, diagnostics) so a headless client can drive a run; the discrete event
 queue is bounded and a slow consumer drops events instead of growing memory. Counters
 are unique URL records by persisted state and must reconcile with storage. Durable truth
-stays in SQLite; events are a live view. The displayed user agent is not a viewport. Checkers
-are not shipped; live evaluation is `unsupported` until owner issues land. Current 14
+stays in SQLite; events are a live view. The displayed user agent is not a viewport. A versioned
+rule engine evaluates registered checkers against stored observations with no recrawl. Findings
+use a stable rule-plus-entity identity and keep fact, recommendation and severity separate.
+Missing prerequisites resolve to `incomplete` or `unsupported`, never `passed`. Scoped
+suppressions require a reason, are auditable, and do not delete evidence. Inventory checkers
+are not shipped; unregistered catalogue rules stay `unsupported`. Current 14
 September 2026 findings are stored separately from the historical "new issues" column.
 No-count rows are not failures. Duplicate fetch identities are scheduled once. Every URL
 ends fetched, excluded, blocked, failed or pending with a reason. A cancelled run is not
@@ -92,7 +96,7 @@ Signature-Input values. Disk-full and migration failures are visible and leave t
 incomplete. Raw HTML retention is off by default and quota-bounded when enabled. An
 uncommitted writer batch (default 32 statements) can be lost on crash.
 
-Not implemented: rule checkers, cross-run finding history,
+Not implemented: inventory rule checkers, cross-run finding history,
 scheduling, credential editing/storage, mobile rendering or JS.
 The page cap (20,000) and historical 3,725-page observation are not catalogue size.
 Weekly Monday is recorded without a time, timezone, or scheduler.
@@ -108,7 +112,7 @@ lists it as an ignored parameter. Path slash variants and query order stay disti
 ## Next milestones
 
 1. Shortest-path depth from the homepage graph; sitemaps stay separate evidence.
-2. Rule checkers over stored observations (titles, links, canonicals); then the broader Semrush catalogue.
+2. Inventory rule checkers over stored observations (titles, links, canonicals); then the broader Semrush catalogue.
 3. Cross-run history, scheduled headless runs and exports. A web UI can follow independently.
 
 Recorded TiendaCables settings: www.tiendacables.com; 20,000 page cap; 3,725-page
@@ -147,7 +151,9 @@ client, cancel/resume commands, counter reconciliation with persisted URL states
 bounded event queue that drops when the consumer lags. Persistence fixtures cover kill/restart resume
 without duplicate findings, in-flight retry, secret-free stored settings, writer batching,
 optional HTML quotas, and visible disk-full/migration failures that leave partial runs
-incomplete. Extraction fixtures cover missing/multiple tags, malformed HTML, non-HTML
+incomplete. Rule-execution fixtures cover stable finding identities, incomplete/unsupported
+prerequisites that never pass, fact/recommendation/severity separation, stored-observation
+reruns without a recrawl, and auditable suppressions that keep evidence. Extraction fixtures cover missing/multiple tags, malformed HTML, non-HTML
 responses, encoding fallback, link/resource host ownership, and truncated/challenge/error
 bodies that stay incomplete. They do not contact the storefront.
 
