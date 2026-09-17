@@ -1240,7 +1240,7 @@ pub const RULES: &[Rule] = &[
             "alt_attribute",
             Some("alt attribute present"),
             false,
-            "Empty alt may be intentional; TC-462 decides.",
+            "Missing alt is a finding. Explicit alt=\"\" is decorative and not this warning.",
         ),
         &["https://html.spec.whatwg.org/multipage/embedded-content.html#the-img-element"],
         &["TC-462"],

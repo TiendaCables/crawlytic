@@ -12,7 +12,7 @@ use crate::crawl::{
 };
 use crate::extract::{
     EmbeddedKind, ExtractedObservations, Heading, HostOwner, Hreflang, LinkObservation,
-    ObservationFlags, PageObservation, RedirectHop, ResourceObservation,
+    ObservationFlags, PageObservation, RedirectHop, ResourceFetch, ResourceObservation,
 };
 use crate::profile::Profile;
 use crate::robots::{RobotsFetchState, RobotsRunMetadata};
@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use url::Url;
 
-pub const STORE_SCHEMA_VERSION: i64 = 6;
+pub const STORE_SCHEMA_VERSION: i64 = 7;
 const DEFAULT_BATCH_SIZE: usize = 32;
 
 const MIGRATION_1: &str = "
@@ -326,6 +326,21 @@ CREATE TABLE robots_runs (
 );
 ";
 
+const MIGRATION_7: &str = "
+CREATE TABLE resource_fetches (
+    run_id INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    identity TEXT NOT NULL,
+    status INTEGER,
+    failed_reason TEXT,
+    challenge INTEGER NOT NULL,
+    credentials_attached INTEGER NOT NULL,
+    robots_blocked INTEGER NOT NULL,
+    robots_known INTEGER NOT NULL,
+    content_type TEXT NOT NULL,
+    PRIMARY KEY (run_id, identity)
+);
+";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StoreErrorKind {
     DiskFull,
@@ -476,6 +491,7 @@ pub struct LoadedRun {
     pub robots: Option<RobotsRunMetadata>,
     pub findings: Vec<FindingRecord>,
     pub observations: Vec<ExtractedObservations>,
+    pub resource_fetches: Vec<ResourceFetch>,
 }
 
 #[derive(Clone)]
@@ -756,6 +772,39 @@ impl Store {
                     identity,
                     resource_kind_str(kind),
                     referring_identity
+                ],
+            )?;
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    pub fn put_resource_fetch(&self, run_id: i64, fetch: &ResourceFetch) -> Result<(), StoreError> {
+        let mut inner = self.lock();
+        inner.write(|conn| {
+            conn.execute(
+                "INSERT INTO resource_fetches(
+                    run_id, identity, status, failed_reason, challenge, credentials_attached,
+                    robots_blocked, robots_known, content_type
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                 ON CONFLICT(run_id, identity) DO UPDATE SET
+                    status=excluded.status,
+                    failed_reason=excluded.failed_reason,
+                    challenge=excluded.challenge,
+                    credentials_attached=excluded.credentials_attached,
+                    robots_blocked=excluded.robots_blocked,
+                    robots_known=excluded.robots_known,
+                    content_type=excluded.content_type",
+                params![
+                    run_id,
+                    fetch.identity,
+                    fetch.status.map(|status| status as i64),
+                    fetch.failed_reason.as_deref(),
+                    fetch.challenge as i64,
+                    fetch.credentials_attached as i64,
+                    fetch.robots_blocked as i64,
+                    fetch.robots_known as i64,
+                    fetch.content_type,
                 ],
             )?;
             Ok(())
@@ -1420,6 +1469,16 @@ fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
             params![6, now_secs()],
         )
         .map_err(|err| StoreError::migration(err.to_string()))?;
+        current = 6;
+    }
+    if current < 7 {
+        tx.execute_batch(MIGRATION_7)
+            .map_err(|err| StoreError::migration(err.to_string()))?;
+        tx.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (?1, ?2)",
+            params![7, now_secs()],
+        )
+        .map_err(|err| StoreError::migration(err.to_string()))?;
     }
     tx.commit()
         .map_err(|err| StoreError::migration(err.to_string()))?;
@@ -1520,6 +1579,7 @@ fn load_run_from(conn: &Connection, run_id: i64) -> Result<LoadedRun, StoreError
         robots: load_robots(conn, run_id)?,
         findings,
         observations,
+        resource_fetches: load_resource_fetches(conn, run_id)?,
     })
 }
 
@@ -1698,6 +1758,54 @@ fn load_resources(conn: &Connection, run_id: i64) -> Result<Vec<ResourceRef>, St
         });
     }
     Ok(refs)
+}
+
+fn load_resource_fetches(conn: &Connection, run_id: i64) -> Result<Vec<ResourceFetch>, StoreError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT identity, status, failed_reason, challenge, credentials_attached,
+                    robots_blocked, robots_known, content_type
+             FROM resource_fetches WHERE run_id = ?1 ORDER BY identity",
+        )
+        .map_err(map_write)?;
+    let rows = stmt
+        .query_map(params![run_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<i64>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, String>(7)?,
+            ))
+        })
+        .map_err(map_write)?;
+    let mut fetches = Vec::new();
+    for row in rows {
+        let (
+            identity,
+            status,
+            failed_reason,
+            challenge,
+            credentials_attached,
+            robots_blocked,
+            robots_known,
+            content_type,
+        ) = row.map_err(map_write)?;
+        fetches.push(ResourceFetch {
+            identity,
+            status: status.map(|value| value as u16),
+            failed_reason,
+            challenge: challenge != 0,
+            credentials_attached: credentials_attached != 0,
+            robots_blocked: robots_blocked != 0,
+            robots_known: robots_known != 0,
+            content_type,
+        });
+    }
+    Ok(fetches)
 }
 
 fn load_sitemap(conn: &Connection, run_id: i64) -> Result<SitemapInventory, StoreError> {

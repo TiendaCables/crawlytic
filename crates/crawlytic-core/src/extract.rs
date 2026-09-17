@@ -152,6 +152,20 @@ pub struct ResourceObservation {
     pub host_owner: HostOwner,
 }
 
+/// Probe of a shared image/script/style URL. Not a page observation and not
+/// counted in `max_pages`. Credentials must stay false.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceFetch {
+    pub identity: String,
+    pub status: Option<u16>,
+    pub failed_reason: Option<String>,
+    pub challenge: bool,
+    pub credentials_attached: bool,
+    pub robots_blocked: bool,
+    pub robots_known: bool,
+    pub content_type: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtractedObservations {
     pub schema_version: u32,
@@ -270,7 +284,7 @@ fn is_html(content_type: &str, decoded: &str) -> bool {
     lower.contains("<html") || lower.contains("<!doctype")
 }
 
-fn looks_like_challenge(decoded: &str) -> bool {
+pub(crate) fn looks_like_challenge(decoded: &str) -> bool {
     let lower = decoded.to_ascii_lowercase();
     lower.contains("cf-chl-") || lower.contains("<title>just a moment")
 }
@@ -1423,6 +1437,7 @@ mod tests {
             <body>
               <img src="/logo.png" alt="Logo">
               <img src="https://cdn.example.com/hero.jpg">
+              <img src="/deco.png" alt="">
             </body></html>"#,
         );
         let css = obs
@@ -1450,7 +1465,14 @@ mod tests {
             .find(|item| item.href.contains("hero.jpg"))
             .unwrap();
         assert_eq!(hero.host_owner, HostOwner::OtherHost);
+        assert_eq!(hero.alt, None);
         assert_eq!(hero.referring, url().as_str());
+        let deco = obs
+            .resources
+            .iter()
+            .find(|item| item.href == "/deco.png")
+            .unwrap();
+        assert_eq!(deco.alt.as_deref(), Some(""));
     }
 
     #[test]

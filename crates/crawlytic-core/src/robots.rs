@@ -125,6 +125,19 @@ impl RobotsCache {
             .insert(origin, file.clone());
         Ok(file)
     }
+
+    pub async fn for_url_unsigned(&self, transport: &SignedTransport, url: &Url) -> RobotsFile {
+        let origin = origin_key(url);
+        if let Some(existing) = self.files.lock().expect("robots cache").get(&origin) {
+            return existing.clone();
+        }
+        let file = fetch_robots_unsigned(transport, url).await;
+        self.files
+            .lock()
+            .expect("robots cache")
+            .insert(origin, file.clone());
+        file
+    }
 }
 
 impl Default for RobotsCache {
@@ -223,6 +236,37 @@ async fn fetch_robots(
                 observation: err.observation().to_owned(),
             },
         }),
+    }
+}
+
+async fn fetch_robots_unsigned(transport: &SignedTransport, url: &Url) -> RobotsFile {
+    let robots = robots_url(url);
+    match transport.get_unsigned(&robots, 65_536).await {
+        Ok((status, _, body)) => match status {
+            404 | 410 => RobotsFile {
+                groups: Vec::new(),
+                sitemaps: Vec::new(),
+                format_errors: Vec::new(),
+                fetch: RobotsFetchState::NotFound { status },
+            },
+            200..=299 => parse_robots(body.as_slice(), RobotsFetchState::Fetched { status }),
+            _ => RobotsFile {
+                groups: Vec::new(),
+                sitemaps: Vec::new(),
+                format_errors: Vec::new(),
+                fetch: RobotsFetchState::Unavailable {
+                    observation: format!("HTTP {status} from {robots}"),
+                },
+            },
+        },
+        Err(err) => RobotsFile {
+            groups: Vec::new(),
+            sitemaps: Vec::new(),
+            format_errors: Vec::new(),
+            fetch: RobotsFetchState::Unavailable {
+                observation: err.observation().to_owned(),
+            },
+        },
     }
 }
 

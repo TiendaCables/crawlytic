@@ -38,7 +38,7 @@ pub use engine::{
 pub use extract::{
     EXTRACTION_SCHEMA_VERSION, EmbeddedKind, ExtractHeader, ExtractInput, ExtractedObservations,
     Heading, HostOwner, Hreflang, LinkObservation, ObservationFlags, PageObservation, RedirectHop,
-    ResourceObservation, extract,
+    ResourceFetch, ResourceObservation, extract,
 };
 pub use profile::{
     CrawlDelay, DiscoveryMode, IgnoredParameterMode, Profile, ProfileRole, SCHEMA_VERSION,
@@ -55,7 +55,8 @@ pub use rules::{
     DEFAULT_MAX_URL_CHARS, DEFAULT_MIN_TITLE_CHARS, NavigationGraph, PageNavigation,
     audit_registry, build_navigation_graph, html_metadata_registry, indexability_registry,
     link_audit_registry, navigation_registry, normalize_meta, register_html_metadata,
-    register_indexability, register_link_audit, register_navigation,
+    register_indexability, register_link_audit, register_navigation, register_resource_audit,
+    resource_audit_registry,
 };
 pub use scope::{
     ClassifiedUrl, Coverage, CoverageLink, CoverageUrl, FetchIdentity, SKIP_MALFORMED,

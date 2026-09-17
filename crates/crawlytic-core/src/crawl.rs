@@ -12,7 +12,7 @@ use crate::auth::WebBotAuth;
 use crate::discovery::{
     ParsedSitemap, decode_sitemap_body, extract_navigational_links, parse_sitemap_xml,
 };
-use crate::extract::{ExtractHeader, ExtractInput, ExtractedObservations, extract};
+use crate::extract::{ExtractHeader, ExtractInput, ExtractedObservations, ResourceFetch, extract};
 use crate::profile::Profile;
 use crate::robots::{AllowReason, RobotsCache, RobotsFile, RobotsRunMetadata, UrlAccess};
 use crate::scope::{ClassifiedUrl, Coverage, CoverageLink, FetchIdentity, classify_href};
@@ -246,6 +246,7 @@ pub struct CrawlReport {
     pub sitemap: SitemapInventory,
     pub links: Vec<CoverageLink>,
     pub observations: Vec<ExtractedObservations>,
+    pub resource_fetches: Vec<ResourceFetch>,
 }
 
 impl CrawlReport {
@@ -543,6 +544,9 @@ impl Crawler {
             persist_error: None,
             notify: self.notify.clone(),
             observations: std::mem::take(&mut self.observations),
+            resource_queue: VecDeque::new(),
+            resource_seen: BTreeSet::new(),
+            resource_fetches: Vec::new(),
         }));
         let gate = Arc::new(tokio::sync::Mutex::new(None::<tokio::time::Instant>));
         let mut tasks = tokio::task::JoinSet::new();
@@ -610,6 +614,63 @@ impl Crawler {
 
         while tasks.join_next().await.is_some() {}
 
+        let robots_cache = Arc::new(robots_cache);
+        if !stop_scheduling && !cancel.is_cancelled() {
+            loop {
+                if cancel.is_cancelled() {
+                    stop_scheduling = true;
+                }
+                {
+                    let state = shared.lock().await;
+                    if state.auth_failed || state.persist_error.is_some() {
+                        stop_scheduling = true;
+                    }
+                }
+                while !stop_scheduling && tasks.len() < concurrency {
+                    let Some(url) = shared.lock().await.resource_queue.pop_front() else {
+                        break;
+                    };
+                    let shared = shared.clone();
+                    let transport = transport.clone();
+                    let profile = profile.clone();
+                    let limits = limits.clone();
+                    let cancel = cancel.clone();
+                    let gate = gate.clone();
+                    let robots_file = robots_file.clone();
+                    let robots_cache = robots_cache.clone();
+                    tasks.spawn(async move {
+                        process_resource(
+                            url,
+                            transport,
+                            profile,
+                            limits,
+                            cancel,
+                            gate,
+                            robots_file,
+                            robots_cache,
+                            shared,
+                        )
+                        .await
+                    });
+                }
+                if tasks.is_empty() {
+                    break;
+                }
+                tokio::select! {
+                    _ = cancel.cancelled() => {
+                        stop_scheduling = true;
+                        tasks.abort_all();
+                    }
+                    joined = tasks.join_next() => {
+                        if let Some(Ok(WorkerOut::Auth | WorkerOut::Cancelled)) = joined {
+                            stop_scheduling = true;
+                        }
+                    }
+                }
+            }
+            while tasks.join_next().await.is_some() {}
+        }
+
         let cancelled = cancel.is_cancelled();
         let mut state = shared.lock().await;
         let auth_failed = state.auth_failed;
@@ -636,6 +697,7 @@ impl Crawler {
         self.coverage = std::mem::take(&mut state.coverage);
         self.observations = std::mem::take(&mut state.observations);
         let observations = self.observations.clone();
+        let resource_fetches = std::mem::take(&mut state.resource_fetches);
         stamp_sitemap_provenance(&mut self.records, &sitemap);
         let persist_error = persist_error.or_else(|| {
             persist_checkpoint(
@@ -657,7 +719,7 @@ impl Crawler {
             cancelled,
             persist_error.as_deref(),
         );
-        with_persist_error(
+        let mut crawl_report = with_persist_error(
             report(
                 &self.records,
                 completed,
@@ -668,7 +730,9 @@ impl Crawler {
                 observations,
             ),
             persist_error,
-        )
+        );
+        crawl_report.resource_fetches = resource_fetches;
+        crawl_report
     }
 }
 
@@ -681,6 +745,9 @@ struct RunState {
     persist_error: Option<String>,
     notify: CrawlNotify,
     observations: Vec<ExtractedObservations>,
+    resource_queue: VecDeque<Url>,
+    resource_seen: BTreeSet<String>,
+    resource_fetches: Vec<ResourceFetch>,
 }
 
 struct PageOffer {
@@ -891,6 +958,7 @@ fn report(
         sitemap,
         links: links.to_vec(),
         observations,
+        resource_fetches: Vec::new(),
     }
 }
 
@@ -1080,7 +1148,95 @@ async fn persist_observation(
     {
         note_persist_error(&mut state, err);
     }
+    enqueue_page_resources(&mut state, &observation);
     state.observations.push(observation);
+}
+
+fn enqueue_page_resources(state: &mut RunState, observation: &ExtractedObservations) {
+    for resource in &observation.resources {
+        let Some(destination) = resource.destination.as_deref() else {
+            continue;
+        };
+        let Ok(url) = Url::parse(destination) else {
+            continue;
+        };
+        if url.scheme() != "https" {
+            continue;
+        }
+        let key = FetchIdentity::from_url(&url).as_str().to_owned();
+        if state.resource_seen.insert(key) {
+            state.resource_queue.push_back(url);
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn process_resource(
+    url: Url,
+    transport: SignedTransport,
+    profile: Profile,
+    limits: CrawlLimits,
+    cancel: CancelHandle,
+    gate: Arc<tokio::sync::Mutex<Option<tokio::time::Instant>>>,
+    robots_file: Option<Arc<RobotsFile>>,
+    robots_cache: Arc<RobotsCache>,
+    shared: Arc<tokio::sync::Mutex<RunState>>,
+) -> WorkerOut {
+    if cancel.is_cancelled() {
+        return WorkerOut::Cancelled;
+    }
+    let same_origin = url.origin() == profile.start_url.origin();
+    let file = if same_origin {
+        robots_file.as_deref().cloned()
+    } else {
+        Some(robots_cache.for_url_unsigned(&transport, &url).await)
+    };
+    let (robots_blocked, robots_known) = match file.as_ref() {
+        Some(file) => {
+            let known = !matches!(
+                file.fetch_state(),
+                crate::robots::RobotsFetchState::Unavailable { .. }
+            );
+            let blocked = matches!(file.decide(&profile, &url), UrlAccess::Blocked(_));
+            (blocked, known)
+        }
+        None => (false, false),
+    };
+    let identity = FetchIdentity::from_url(&url).as_str().to_owned();
+    if robots_blocked {
+        let fetch = ResourceFetch {
+            identity,
+            status: None,
+            failed_reason: None,
+            challenge: false,
+            credentials_attached: false,
+            robots_blocked: true,
+            robots_known: true,
+            content_type: String::new(),
+        };
+        persist_resource_fetch(&shared, fetch).await;
+        return WorkerOut::Done;
+    }
+    pace(&gate, &limits).await;
+    if cancel.is_cancelled() {
+        return WorkerOut::Cancelled;
+    }
+    let mut fetch = transport.probe_asset(&url).await;
+    fetch.identity = identity;
+    fetch.robots_blocked = false;
+    fetch.robots_known = robots_known;
+    persist_resource_fetch(&shared, fetch).await;
+    WorkerOut::Done
+}
+
+async fn persist_resource_fetch(shared: &tokio::sync::Mutex<RunState>, fetch: ResourceFetch) {
+    let mut state = shared.lock().await;
+    if let Some(session) = state.persist.clone()
+        && let Err(err) = session.store.put_resource_fetch(session.run_id, &fetch)
+    {
+        note_persist_error(&mut state, err);
+    }
+    state.resource_fetches.push(fetch);
 }
 
 fn record_key_for(record: &UrlRecord) -> String {
@@ -1534,8 +1690,9 @@ mod tests {
         },
     }
 
-    #[derive(Clone)]
+    #[derive(Clone, Debug)]
     struct Recorded {
+        method: String,
         path: String,
         headers: HashMap<String, String>,
     }
@@ -1751,11 +1908,9 @@ mod tests {
         let text = String::from_utf8_lossy(&buf);
         let mut lines = text.split("\r\n");
         let request_line = lines.next().unwrap_or("");
-        let path = request_line
-            .split_whitespace()
-            .nth(1)
-            .unwrap_or("/")
-            .to_owned();
+        let mut parts = request_line.split_whitespace();
+        let method = parts.next().unwrap_or("GET").to_owned();
+        let path = parts.next().unwrap_or("/").to_owned();
         let mut headers = HashMap::new();
         for line in lines {
             if line.is_empty() {
@@ -1765,7 +1920,11 @@ mod tests {
                 headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_owned());
             }
         }
-        Ok(Recorded { path, headers })
+        Ok(Recorded {
+            method,
+            path,
+            headers,
+        })
     }
 
     fn auth() -> WebBotAuth {
@@ -2175,6 +2334,77 @@ lists_complete = false
         assert_ne!(slow.state, UrlState::Fetched);
         assert!(!held.page_paths().contains(&"/later".to_owned()));
         assert_signed(&held);
+    }
+
+    #[tokio::test]
+    async fn shared_resources_are_probed_once_without_page_slots_or_secrets() {
+        let origin = TestOrigin::https();
+        origin.allow_robots();
+        origin.on(
+            "/",
+            200,
+            "text/html",
+            r#"<html><body>
+              <img src="/ok.png" alt="ok">
+              <img src="/ok.png" alt="dup">
+              <link rel="stylesheet" href="/app.css">
+              <img src="/secret.png" alt="blocked">
+            </body></html>"#,
+        );
+        origin.on("/ok.png", 200, "image/png", "PNG");
+        origin.on("/app.css", 405, "text/plain", "no head");
+        origin.on("/app.css", 200, "text/css", "body{}");
+        origin.on("/secret.png", 200, "image/png", "no");
+        let mut lim = limits();
+        lim.concurrency = 1;
+        lim.max_urls = 1;
+        let mut crawl = crawler(&origin, lim);
+        let report = crawl.run().await;
+        assert!(report.completed, "{report:?}");
+        assert_eq!(
+            report.urls.len(),
+            1,
+            "resources must not consume page slots"
+        );
+        assert_eq!(report.urls[0].state, UrlState::Fetched);
+        let ok = report
+            .resource_fetches
+            .iter()
+            .find(|fetch| fetch.identity.contains("/ok.png"))
+            .unwrap();
+        assert_eq!(ok.status, Some(200));
+        assert!(!ok.credentials_attached);
+        assert!(!ok.robots_blocked);
+        let css = report
+            .resource_fetches
+            .iter()
+            .find(|fetch| fetch.identity.contains("/app.css"))
+            .unwrap();
+        assert_eq!(css.status, Some(200));
+        let secret = report
+            .resource_fetches
+            .iter()
+            .find(|fetch| fetch.identity.contains("/secret.png"))
+            .unwrap();
+        assert!(secret.robots_blocked);
+        assert!(secret.status.is_none());
+        let recorded = origin.recorded();
+        let ok_hits: Vec<_> = recorded
+            .iter()
+            .filter(|req| req.path == "/ok.png")
+            .collect();
+        assert_eq!(ok_hits.len(), 1, "shared image fetched once: {recorded:?}");
+        assert_eq!(ok_hits[0].method, "HEAD");
+        assert!(!ok_hits[0].headers.contains_key("signature"));
+        let css_hits: Vec<_> = recorded
+            .iter()
+            .filter(|req| req.path == "/app.css")
+            .collect();
+        assert_eq!(css_hits.len(), 2, "HEAD fallback to GET: {css_hits:?}");
+        assert_eq!(css_hits[0].method, "HEAD");
+        assert_eq!(css_hits[1].method, "GET");
+        assert!(recorded.iter().all(|req| req.path != "/secret.png"));
+        assert!(!format!("{report:?}").contains("TESTSIGNATUREVALUE"));
     }
 
     #[tokio::test]

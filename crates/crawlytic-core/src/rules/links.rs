@@ -548,7 +548,8 @@ impl Checker for ExternalHttp403 {
         let hits = collect_nav(&pages, &index, |link| {
             is_nav_link(link) && link.host_owner == HostOwner::OtherHost
         });
-        if hits.is_empty() {
+        let resource_findings = super::resources::external_resource_403(evidence);
+        if hits.is_empty() && resource_findings.is_empty() {
             return not_applicable();
         }
         if hits.iter().any(|hit| {
@@ -579,6 +580,7 @@ impl Checker for ExternalHttp403 {
                 });
             }
         }
+        findings.extend(resource_findings);
         complete(findings)
     }
 }
@@ -1185,6 +1187,7 @@ mod tests {
                 sitemap: None,
                 sitemap_done: false,
                 robots: None,
+                resource_fetches: &[],
             },
             &config(),
             &link_audit_registry(),
