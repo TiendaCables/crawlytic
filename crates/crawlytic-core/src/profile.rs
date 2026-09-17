@@ -112,6 +112,10 @@ impl Profile {
         Ok(p)
     }
 
+    pub fn to_toml(&self) -> Result<String> {
+        toml::to_string_pretty(self).context("Cannot serialize profile")
+    }
+
     fn validate(&self) -> Result<()> {
         ensure!(
             self.schema_version == SCHEMA_VERSION,
@@ -539,6 +543,18 @@ lists_complete = false
             None,
             "trailing slash must not become a string prefix"
         );
+    }
+
+    #[test]
+    fn to_toml_round_trips_environment_names_not_secrets() {
+        let own = Profile::load(include_str!("../../../profile.example.toml")).unwrap();
+        let text = own.to_toml().unwrap();
+        let reloaded = Profile::load(&text).unwrap();
+        assert_eq!(reloaded.start_url, own.start_url);
+        assert_eq!(reloaded.auth_signature_env, "CRAWL_SIGNATURE");
+        let lower = text.to_ascii_lowercase();
+        assert!(!lower.contains("sig1="), "{text}");
+        assert!(!text.contains("TESTSIGNATURE"), "{text}");
     }
 
     #[test]

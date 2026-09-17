@@ -451,6 +451,19 @@ pub struct RetentionPolicy {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunSummary {
+    pub id: i64,
+    pub status: RunStatus,
+    pub completed: bool,
+    pub cancelled: bool,
+    pub error: Option<String>,
+    pub started_at: i64,
+    pub updated_at: i64,
+    pub start_url: String,
+    pub url_count: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FindingRecord {
     pub rule_id: String,
     pub entity_key: String,
@@ -1318,6 +1331,11 @@ impl Store {
         load_run_from(&inner.conn, run_id)
     }
 
+    pub fn list_runs(&self) -> Result<Vec<RunSummary>, StoreError> {
+        let inner = self.lock();
+        list_runs_from(&inner.conn)
+    }
+
     #[cfg(test)]
     fn limit_pages_to_current(&self) -> Result<(), StoreError> {
         let mut inner = self.lock();
@@ -1517,6 +1535,54 @@ fn setting(conn: &Connection, key: &str) -> Result<Option<String>, StoreError> {
     )
     .optional()
     .map_err(map_write)
+}
+
+fn list_runs_from(conn: &Connection) -> Result<Vec<RunSummary>, StoreError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT r.id, r.status, r.completed, r.cancelled, r.error,
+                    r.started_at, r.updated_at, p.toml,
+                    (SELECT COUNT(*) FROM url_states u WHERE u.run_id = r.id)
+             FROM runs r JOIN profiles p ON p.id = r.profile_id
+             ORDER BY r.id DESC",
+        )
+        .map_err(map_write)?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, i64>(8)?,
+            ))
+        })
+        .map_err(map_write)?;
+    let mut runs = Vec::new();
+    for row in rows {
+        let (id, status, completed, cancelled, error, started_at, updated_at, toml, url_count) =
+            row.map_err(map_write)?;
+        reject_secrets(&toml)?;
+        let start_url = Profile::load(&toml)
+            .map(|profile| profile.start_url.to_string())
+            .unwrap_or_else(|_| "(invalid profile snapshot)".into());
+        runs.push(RunSummary {
+            id,
+            status: RunStatus::parse(&status)?,
+            completed: completed != 0,
+            cancelled: cancelled != 0,
+            error,
+            started_at,
+            updated_at,
+            start_url,
+            url_count: url_count as u64,
+        });
+    }
+    Ok(runs)
 }
 
 fn load_run_from(conn: &Connection, run_id: i64) -> Result<LoadedRun, StoreError> {
@@ -2655,6 +2721,33 @@ mod tests {
             err.to_string().contains("Refusing to store secrets"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn list_runs_summarizes_status_and_start_url_without_secrets() {
+        let store = Store::open_in_memory().unwrap();
+        let profile = sample_profile();
+        let first = store.begin_run(&profile).unwrap();
+        store
+            .upsert_url(first, &fetched("https://www.tiendacables.com/"))
+            .unwrap();
+        store.flush().unwrap();
+        let second = store.begin_run(&profile).unwrap();
+        store
+            .mark_incomplete(second, "cancelled by operator")
+            .unwrap();
+        store.flush().unwrap();
+
+        let runs = store.list_runs().unwrap();
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0].id, second);
+        assert_eq!(runs[0].status, RunStatus::Incomplete);
+        assert_eq!(runs[0].start_url, "https://www.tiendacables.com/");
+        assert_eq!(runs[1].id, first);
+        assert_eq!(runs[1].url_count, 1);
+        let dump = format!("{runs:?}");
+        assert!(!dump.to_ascii_lowercase().contains("sig1="), "{dump}");
+        assert!(!dump.contains("TESTSIGNATURE"), "{dump}");
     }
 
     #[test]

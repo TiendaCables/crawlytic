@@ -63,8 +63,8 @@ pub use scope::{
     SKIP_UNSUPPORTED_SCHEME, classify_absolute, classify_href,
 };
 pub use store::{
-    FindingRecord, LoadedRun, ResourceRef, RetentionPolicy, RunStatus, STORE_SCHEMA_VERSION, Store,
-    StoreError, StoreErrorKind,
+    FindingRecord, LoadedRun, ResourceRef, RetentionPolicy, RunStatus, RunSummary,
+    STORE_SCHEMA_VERSION, Store, StoreError, StoreErrorKind,
 };
 pub use transport::{AccessError, FetchRecord, Probe, ResourceKind, SignedTransport, preflight};
 
