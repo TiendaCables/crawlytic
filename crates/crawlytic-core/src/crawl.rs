@@ -13,6 +13,7 @@ use crate::discovery::{
     ParsedSitemap, decode_sitemap_body, extract_navigational_links, parse_sitemap_xml,
 };
 use crate::extract::{ExtractHeader, ExtractInput, ExtractedObservations, ResourceFetch, extract};
+use crate::https::{HostProbe, HostProbeKind, TlsInspection, apex_and_www, inspect_tls};
 use crate::profile::Profile;
 use crate::robots::{AllowReason, RobotsCache, RobotsFile, RobotsRunMetadata, UrlAccess};
 use crate::scope::{ClassifiedUrl, Coverage, CoverageLink, FetchIdentity, classify_href};
@@ -250,6 +251,8 @@ pub struct CrawlReport {
     pub links: Vec<CoverageLink>,
     pub observations: Vec<ExtractedObservations>,
     pub resource_fetches: Vec<ResourceFetch>,
+    pub tls_inspections: Vec<TlsInspection>,
+    pub host_probes: Vec<HostProbe>,
 }
 
 impl CrawlReport {
@@ -552,6 +555,8 @@ impl Crawler {
             resource_fetches: Vec::new(),
             hreflang_queue: VecDeque::new(),
             hreflang_seen: BTreeSet::new(),
+            tls_inspections: Vec::new(),
+            host_probes: Vec::new(),
             start_url: self.profile.start_url.clone(),
         }));
         let gate = Arc::new(tokio::sync::Mutex::new(None::<tokio::time::Instant>));
@@ -740,6 +745,10 @@ impl Crawler {
             while tasks.join_next().await.is_some() {}
         }
 
+        if !stop_scheduling && !cancel.is_cancelled() {
+            run_https_probes(&transport, &profile, &shared).await;
+        }
+
         let cancelled = cancel.is_cancelled();
         let mut state = shared.lock().await;
         let auth_failed = state.auth_failed;
@@ -767,6 +776,8 @@ impl Crawler {
         self.observations = std::mem::take(&mut state.observations);
         let observations = self.observations.clone();
         let resource_fetches = std::mem::take(&mut state.resource_fetches);
+        let tls_inspections = std::mem::take(&mut state.tls_inspections);
+        let host_probes = std::mem::take(&mut state.host_probes);
         stamp_sitemap_provenance(&mut self.records, &sitemap);
         let persist_error = persist_error.or_else(|| {
             persist_checkpoint(
@@ -801,6 +812,8 @@ impl Crawler {
             persist_error,
         );
         crawl_report.resource_fetches = resource_fetches;
+        crawl_report.tls_inspections = tls_inspections;
+        crawl_report.host_probes = host_probes;
         crawl_report
     }
 }
@@ -819,6 +832,8 @@ struct RunState {
     resource_fetches: Vec<ResourceFetch>,
     hreflang_queue: VecDeque<Url>,
     hreflang_seen: BTreeSet<String>,
+    tls_inspections: Vec<TlsInspection>,
+    host_probes: Vec<HostProbe>,
     start_url: Url,
 }
 
@@ -1031,6 +1046,8 @@ fn report(
         links: links.to_vec(),
         observations,
         resource_fetches: Vec::new(),
+        tls_inspections: Vec::new(),
+        host_probes: Vec::new(),
     }
 }
 
@@ -1454,6 +1471,84 @@ async fn persist_locale_observation(
         note_persist_error(&mut state, err);
     }
     state.observations.push(observation);
+}
+
+async fn run_https_probes(
+    transport: &SignedTransport,
+    profile: &Profile,
+    shared: &tokio::sync::Mutex<RunState>,
+) {
+    let start = profile.start_url.clone();
+    let host = start.host_str().unwrap_or_default().to_owned();
+    let port = start.port_or_known_default().unwrap_or(443);
+    let inspection = inspect_tls(&host, port);
+    persist_tls_inspection(shared, inspection).await;
+    if let Some((apex, www)) = apex_and_www(&host) {
+        if www != host {
+            persist_tls_inspection(shared, inspect_tls(&www, 443)).await;
+        }
+        if apex != host {
+            persist_tls_inspection(shared, inspect_tls(&apex, 443)).await;
+        }
+        let mut www_url = start.clone();
+        www_url.set_host(Some(&www)).ok();
+        www_url.set_path("/");
+        www_url.set_query(None);
+        www_url.set_fragment(None);
+        let mut apex_url = start.clone();
+        apex_url.set_host(Some(&apex)).ok();
+        apex_url.set_path("/");
+        apex_url.set_query(None);
+        apex_url.set_fragment(None);
+        persist_host_probe(
+            shared,
+            transport
+                .probe_host(&www_url, HostProbeKind::HttpsWww)
+                .await,
+        )
+        .await;
+        persist_host_probe(
+            shared,
+            transport
+                .probe_host(&apex_url, HostProbeKind::HttpsApex)
+                .await,
+        )
+        .await;
+    }
+    let mut http = start.clone();
+    let _ = http.set_scheme("http");
+    http.set_path("/");
+    http.set_query(None);
+    http.set_fragment(None);
+    persist_host_probe(
+        shared,
+        transport
+            .probe_host(&http, HostProbeKind::HttpHomepage)
+            .await,
+    )
+    .await;
+}
+
+async fn persist_tls_inspection(shared: &tokio::sync::Mutex<RunState>, inspection: TlsInspection) {
+    let mut state = shared.lock().await;
+    if let Some(session) = state.persist.clone()
+        && let Err(err) = session
+            .store
+            .put_tls_inspection(session.run_id, &inspection)
+    {
+        note_persist_error(&mut state, err);
+    }
+    state.tls_inspections.push(inspection);
+}
+
+async fn persist_host_probe(shared: &tokio::sync::Mutex<RunState>, probe: HostProbe) {
+    let mut state = shared.lock().await;
+    if let Some(session) = state.persist.clone()
+        && let Err(err) = session.store.put_host_probe(session.run_id, &probe)
+    {
+        note_persist_error(&mut state, err);
+    }
+    state.host_probes.push(probe);
 }
 
 async fn persist_resource_fetch(shared: &tokio::sync::Mutex<RunState>, fetch: ResourceFetch) {

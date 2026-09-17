@@ -6,6 +6,7 @@ mod discovery;
 mod engine;
 mod exchange;
 mod extract;
+mod https;
 mod profile;
 mod robots;
 mod rules;
@@ -47,6 +48,10 @@ pub use extract::{
     Heading, HostOwner, Hreflang, LinkObservation, ObservationFlags, PageObservation, RedirectHop,
     ResourceFetch, ResourceObservation, StructuredBlock, StructuredFormat, extract,
 };
+pub use https::{
+    DEFAULT_DAYS_BEFORE_EXPIRY, HostProbe, HostProbeKind, MIXED_CONTENT_DYNAMIC_COVERAGE,
+    MIXED_CONTENT_STATIC_COVERAGE, TLS_VERIFIER, TlsInspection, inspect_tls, production_roots,
+};
 pub use profile::{
     CrawlDelay, DiscoveryMode, IgnoredParameterMode, Profile, ProfileRole, SCHEMA_VERSION,
     ScheduleCadence, Weekday,
@@ -65,10 +70,11 @@ pub use rules::{
     MICRODATA_COVERAGE, NavigationGraph, PageNavigation, RDFA_COVERAGE,
     SEARCH_FEATURE_RULE_VERSION, STRUCTURED_DATA_VALIDATOR_VERSION, VOCABULARY_RULE_VERSION,
     audit_registry, build_navigation_graph, content_registry, hreflang_registry,
-    html_metadata_registry, indexability_registry, link_audit_registry, navigation_registry,
-    normalize_meta, register_content, register_hreflang, register_html_metadata,
-    register_indexability, register_link_audit, register_navigation, register_resource_audit,
-    register_structured_data, resource_audit_registry, structured_data_registry,
+    html_metadata_registry, https_audit_registry, indexability_registry, link_audit_registry,
+    navigation_registry, normalize_meta, register_content, register_hreflang,
+    register_html_metadata, register_https_audit, register_indexability, register_link_audit,
+    register_navigation, register_resource_audit, register_structured_data,
+    resource_audit_registry, structured_data_registry,
 };
 pub use scope::{
     ClassifiedUrl, Coverage, CoverageLink, CoverageUrl, FetchIdentity, SKIP_MALFORMED,

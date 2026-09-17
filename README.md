@@ -55,7 +55,7 @@ locations are recorded and never receive credentials.
 
 ## Boundaries
 
-- `crawlytic-core`: profile, URL identity/scope, robots policy, Web Bot Auth transport, bounded crawl, homepage/sitemap discovery, SQLite run persistence, versioned page/link/resource extraction, evidence-based rule execution and finding lifecycle, HTML metadata, link/URL-shape, canonical/indexability, crawl-depth/orphan, resource, hreflang/lang, duplicate-content and structured-data checkers, typed start/cancel/resume commands with coalesced progress events, run listing for resume, CSV/JSON audit export, and a read-only generic CSV baseline importer; no terminal dependency.
+- `crawlytic-core`: profile, URL identity/scope, robots policy, Web Bot Auth transport, bounded crawl, homepage/sitemap discovery, SQLite run persistence, versioned page/link/resource extraction, evidence-based rule execution and finding lifecycle, HTML metadata, link/URL-shape, canonical/indexability, crawl-depth/orphan, resource, hreflang/lang, duplicate-content, structured-data and HTTPS/certificate checkers, typed start/cancel/resume commands with coalesced progress events, run listing for resume, CSV/JSON audit export, and a read-only generic CSV baseline importer; no terminal dependency.
 - `crawlytic`: Ratatui rendering, key input, profile/auth screens, run/URL/finding investigation and background-task coordination.
 - Future interfaces can use the core without depending on Ratatui. The displayed user agent is the HTTP User-Agent string, not a browser viewport.
 
@@ -134,7 +134,14 @@ Semrush formulas; near-duplicate grouping is transitive and uncertain. Structure
 JSON-LD only (validator v1: Product, Offer, BreadcrumbList, Organization). Syntax, vocabulary and
 search-feature findings stay separate and point at item type, path and field. Microdata and RDFa are
 inventoried and reported as uncovered rather than passed. Local validation does not determine Google
-rich-result eligibility or actual search appearance. Other inventory checkers are not shipped;
+rich-result eligibility or actual search appearance. HTTPS checkers evaluate stored observations plus
+unsigned host probes: HTTP homepage redirects stay distinct from `rel=canonical` HTTPS hints; www/apex
+consolidation uses a configurable preferred host (default: start URL host); non-secure pages;
+HTTPS-to-HTTP links; static mixed content from HTML img/script/style (`static-html`; JavaScript-injected
+mixed content is `incomplete-without-rendering`). Certificates are inspected with rustls and Mozilla
+webpki roots; verification is never disabled in production. Expiry uses `days_before_expiry=14`
+(Crawlytic heuristic, not a Semrush formula). Host probes never attach Web Bot Auth headers to HTTP or
+alternate origins. Other inventory checkers are not shipped;
 unregistered catalogue rules stay `unsupported`. Current 14
 September 2026 findings are stored separately from the historical "new issues" column.
 No-count rows are not failures. Evaluated runs export CSV and JSON with stable finding

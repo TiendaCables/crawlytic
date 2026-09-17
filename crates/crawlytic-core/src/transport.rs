@@ -1,5 +1,6 @@
 use crate::auth::{CRYPTO_VERIFICATION_LIMITATION, WebBotAuth};
-use crate::extract::{RedirectHop, ResourceFetch, looks_like_challenge};
+use crate::extract::{ExtractInput, RedirectHop, ResourceFetch, extract, looks_like_challenge};
+use crate::https::{HostProbe, HostProbeKind};
 use crate::profile::Profile;
 use crate::robots::{RobotsFile, RobotsRunMetadata, UrlAccess};
 use anyhow::{Context, Result};
@@ -140,6 +141,7 @@ impl std::error::Error for AccessError {}
 #[derive(Clone)]
 pub struct SignedTransport {
     client: Client,
+    open_client: Client,
     auth: WebBotAuth,
     approved: Url,
 }
@@ -153,16 +155,30 @@ impl SignedTransport {
             .https_only(true)
             .build()
             .context("Cannot create HTTP client")?;
-        Ok(Self::new_with_client(
+        let open_client = Client::builder()
+            .redirect(Policy::none())
+            .timeout(Duration::from_secs(20))
+            .user_agent(&profile.user_agent)
+            .https_only(false)
+            .build()
+            .context("Cannot create unsigned host-probe client")?;
+        Ok(Self::assemble(
             client,
+            open_client,
             profile.start_url.clone(),
             auth,
         ))
     }
 
+    #[cfg(test)]
     pub(crate) fn new_with_client(client: Client, approved: Url, auth: &WebBotAuth) -> Self {
+        Self::assemble(client.clone(), client, approved, auth)
+    }
+
+    fn assemble(client: Client, open_client: Client, approved: Url, auth: &WebBotAuth) -> Self {
         Self {
             client,
+            open_client,
             auth: auth.clone(),
             approved,
         }
@@ -308,6 +324,107 @@ impl SignedTransport {
                 content_type: String::new(),
             },
         }
+    }
+
+    /// Unsigned origin probe. Never attaches Web Bot Auth headers, including
+    /// when following HTTP or alternate-host redirects.
+    pub async fn probe_host(&self, url: &Url, kind: HostProbeKind) -> HostProbe {
+        let mut probe = HostProbe {
+            kind,
+            requested_url: url.to_string(),
+            destination_url: None,
+            status: None,
+            redirect_chain: Vec::new(),
+            canonicals: Vec::new(),
+            failed_reason: None,
+            credentials_attached: false,
+        };
+        let mut current = url.clone();
+        let mut redirects = 0;
+        loop {
+            match self.send_open(&current).await {
+                Ok(response) => {
+                    let status = response.status();
+                    if status.is_redirection() {
+                        match host_probe_redirect_target(&current, &response) {
+                            Ok(next) => {
+                                probe.redirect_chain.push(RedirectHop {
+                                    from: current.to_string(),
+                                    to: next.to_string(),
+                                    status: status.as_u16(),
+                                });
+                                redirects += 1;
+                                if redirects > MAX_REDIRECTS {
+                                    probe.failed_reason = Some(format!(
+                                        "HTTP {} from {current} exceeded the redirect limit",
+                                        status.as_u16()
+                                    ));
+                                    probe.destination_url = Some(current.to_string());
+                                    probe.status = Some(status.as_u16());
+                                    return probe;
+                                }
+                                current = next;
+                                continue;
+                            }
+                            Err(err) => {
+                                probe.failed_reason = Some(err.observation().to_owned());
+                                probe.destination_url = Some(current.to_string());
+                                probe.status = Some(status.as_u16());
+                                return probe;
+                            }
+                        }
+                    }
+                    let content_type = response
+                        .headers()
+                        .get("content-type")
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or("")
+                        .to_owned();
+                    let (sample, _) = match read_sample(response, SAMPLE_LIMIT).await {
+                        Ok(sample) => sample,
+                        Err(err) => {
+                            probe.failed_reason = Some(err.observation().to_owned());
+                            probe.destination_url = Some(current.to_string());
+                            probe.status = Some(status.as_u16());
+                            return probe;
+                        }
+                    };
+                    probe.status = Some(status.as_u16());
+                    probe.destination_url = Some(current.to_string());
+                    if content_type.contains("text/html") {
+                        let extracted = extract(&ExtractInput {
+                            destination_url: &current,
+                            status: status.as_u16(),
+                            content_type: &content_type,
+                            headers: &[],
+                            body: &sample,
+                            truncated: false,
+                            duration_ms: None,
+                        });
+                        probe.canonicals = extracted.page.canonicals;
+                    }
+                    return probe;
+                }
+                Err(err) => {
+                    probe.failed_reason = Some(err.observation().to_owned());
+                    return probe;
+                }
+            }
+        }
+    }
+
+    async fn send_open(&self, url: &Url) -> std::result::Result<reqwest::Response, AccessError> {
+        for attempt in 0..=MAX_RETRIES {
+            match self.open_client.get(url.clone()).send().await {
+                Ok(response) => return Ok(response),
+                Err(_) if attempt < MAX_RETRIES => {}
+                Err(_) => break,
+            }
+        }
+        Err(AccessError::with_cause(
+            format!("Connection failed to {url}"),
+            "Host probes do not attach Shopify credentials.",
+        ))
     }
 
     pub(crate) async fn get_unsigned(
@@ -545,6 +662,29 @@ fn origin_path(start: &Url, path: &str) -> Url {
     url.set_query(None);
     url.set_fragment(None);
     url
+}
+
+fn host_probe_redirect_target(
+    from: &Url,
+    response: &reqwest::Response,
+) -> std::result::Result<Url, AccessError> {
+    let status = response.status().as_u16();
+    let Some(location) = response
+        .headers()
+        .get(LOCATION)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return Err(AccessError::with_cause(
+            format!("HTTP {status} from {from} without a usable Location header"),
+            "The redirect could not be followed. Credentials were not attached.",
+        ));
+    };
+    from.join(location).map_err(|_| {
+        AccessError::with_cause(
+            format!("HTTP {status} from {from} with an unusable Location header"),
+            "The redirect could not be followed. Credentials were not attached.",
+        )
+    })
 }
 
 fn unsigned_redirect_target(
@@ -1464,5 +1604,55 @@ lists_complete = false
                 .iter()
                 .all(|req| !req.headers.contains_key("signature"))
         );
+    }
+
+    #[tokio::test]
+    async fn host_probes_never_send_credentials_to_http_or_other_hosts() {
+        let approved = TestOrigin::https();
+        let http = TestOrigin::http();
+        let other = TestOrigin::https();
+        http.on(
+            "/",
+            200,
+            "text/html",
+            r#"<html><head><link rel="canonical" href="https://audit.example/"></head></html>"#,
+        );
+        http.redirect("/up", approved.url().as_str());
+        approved.on("/", 200, "text/html", "<html>https</html>");
+        other.on("/", 200, "text/html", "<html>other</html>");
+        let t = transport(&approved);
+        let homepage = t
+            .probe_host(&http.url(), crate::https::HostProbeKind::HttpHomepage)
+            .await;
+        assert!(!homepage.credentials_attached);
+        assert_eq!(homepage.status, Some(200));
+        assert!(homepage.canonical_https(), "{homepage:?}");
+        assert!(!homepage.redirected_to_https());
+        let upgrade = t
+            .probe_host(
+                &origin_path(&http.url(), "/up"),
+                crate::https::HostProbeKind::HttpHomepage,
+            )
+            .await;
+        assert!(upgrade.redirected_to_https(), "{upgrade:?}");
+        assert!(!upgrade.credentials_attached);
+        let other_probe = t
+            .probe_host(&other.url(), crate::https::HostProbeKind::HttpsWww)
+            .await;
+        assert!(!other_probe.credentials_attached);
+        assert_eq!(other_probe.status, Some(200));
+        for req in http.recorded() {
+            assert!(
+                !req.headers.contains_key("signature"),
+                "http probe attached a signature"
+            );
+            assert!(!req.headers.contains_key("signature-input"));
+        }
+        for req in other.recorded() {
+            assert!(!req.headers.contains_key("signature"));
+        }
+        for req in approved.recorded() {
+            assert!(!req.headers.contains_key("signature"));
+        }
     }
 }

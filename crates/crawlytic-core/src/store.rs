@@ -15,6 +15,7 @@ use crate::extract::{
     ObservationFlags, PageObservation, RedirectHop, ResourceFetch, ResourceObservation,
     StructuredBlock, StructuredFormat,
 };
+use crate::https::{HostProbe, HostProbeKind, TlsInspection};
 use crate::profile::Profile;
 use crate::robots::{RobotsFetchState, RobotsRunMetadata};
 use crate::scope::{CoverageLink, CoverageUrl, FetchIdentity};
@@ -26,7 +27,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use url::Url;
 
-pub const STORE_SCHEMA_VERSION: i64 = 8;
+pub const STORE_SCHEMA_VERSION: i64 = 9;
 const DEFAULT_BATCH_SIZE: usize = 32;
 
 const MIGRATION_1: &str = "
@@ -355,6 +356,43 @@ CREATE TABLE observation_structured (
 );
 ";
 
+const MIGRATION_9: &str = "
+CREATE TABLE tls_inspections (
+    run_id INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    host TEXT NOT NULL,
+    port INTEGER NOT NULL,
+    inspected INTEGER NOT NULL,
+    verified INTEGER NOT NULL,
+    hostname_ok INTEGER NOT NULL,
+    not_before_unix INTEGER,
+    not_after_unix INTEGER,
+    names TEXT NOT NULL,
+    error TEXT,
+    credentials_attached INTEGER NOT NULL,
+    PRIMARY KEY (run_id, host, port)
+);
+CREATE TABLE host_probes (
+    run_id INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,
+    requested_url TEXT NOT NULL,
+    destination_url TEXT,
+    status INTEGER,
+    canonicals TEXT NOT NULL,
+    failed_reason TEXT,
+    credentials_attached INTEGER NOT NULL,
+    PRIMARY KEY (run_id, kind)
+);
+CREATE TABLE host_probe_redirects (
+    run_id INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    from_url TEXT NOT NULL,
+    to_url TEXT NOT NULL,
+    status INTEGER NOT NULL,
+    PRIMARY KEY (run_id, kind, seq)
+);
+";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StoreErrorKind {
     DiskFull,
@@ -519,6 +557,8 @@ pub struct LoadedRun {
     pub findings: Vec<FindingRecord>,
     pub observations: Vec<ExtractedObservations>,
     pub resource_fetches: Vec<ResourceFetch>,
+    pub tls_inspections: Vec<TlsInspection>,
+    pub host_probes: Vec<HostProbe>,
 }
 
 #[derive(Clone)]
@@ -834,6 +874,96 @@ impl Store {
                     fetch.content_type,
                 ],
             )?;
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    pub fn put_tls_inspection(
+        &self,
+        run_id: i64,
+        inspection: &TlsInspection,
+    ) -> Result<(), StoreError> {
+        let mut inner = self.lock();
+        inner.write(|conn| {
+            conn.execute(
+                "INSERT INTO tls_inspections(
+                    run_id, host, port, inspected, verified, hostname_ok,
+                    not_before_unix, not_after_unix, names, error, credentials_attached
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                 ON CONFLICT(run_id, host, port) DO UPDATE SET
+                    inspected=excluded.inspected,
+                    verified=excluded.verified,
+                    hostname_ok=excluded.hostname_ok,
+                    not_before_unix=excluded.not_before_unix,
+                    not_after_unix=excluded.not_after_unix,
+                    names=excluded.names,
+                    error=excluded.error,
+                    credentials_attached=excluded.credentials_attached",
+                params![
+                    run_id,
+                    inspection.host,
+                    inspection.port as i64,
+                    inspection.inspected as i64,
+                    inspection.verified as i64,
+                    inspection.hostname_ok as i64,
+                    inspection.not_before_unix,
+                    inspection.not_after_unix,
+                    inspection.names.join("\n"),
+                    inspection.error.as_deref(),
+                    inspection.credentials_attached as i64,
+                ],
+            )?;
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    pub fn put_host_probe(&self, run_id: i64, probe: &HostProbe) -> Result<(), StoreError> {
+        let mut inner = self.lock();
+        inner.write(|conn| {
+            conn.execute(
+                "INSERT INTO host_probes(
+                    run_id, kind, requested_url, destination_url, status, canonicals,
+                    failed_reason, credentials_attached
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 ON CONFLICT(run_id, kind) DO UPDATE SET
+                    requested_url=excluded.requested_url,
+                    destination_url=excluded.destination_url,
+                    status=excluded.status,
+                    canonicals=excluded.canonicals,
+                    failed_reason=excluded.failed_reason,
+                    credentials_attached=excluded.credentials_attached",
+                params![
+                    run_id,
+                    probe.kind.as_str(),
+                    probe.requested_url,
+                    probe.destination_url.as_deref(),
+                    probe.status.map(|status| status as i64),
+                    probe.canonicals.join("\n"),
+                    probe.failed_reason.as_deref(),
+                    probe.credentials_attached as i64,
+                ],
+            )?;
+            conn.execute(
+                "DELETE FROM host_probe_redirects WHERE run_id = ?1 AND kind = ?2",
+                params![run_id, probe.kind.as_str()],
+            )?;
+            for (seq, hop) in probe.redirect_chain.iter().enumerate() {
+                conn.execute(
+                    "INSERT INTO host_probe_redirects(
+                        run_id, kind, seq, from_url, to_url, status
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        run_id,
+                        probe.kind.as_str(),
+                        seq as i64,
+                        hop.from,
+                        hop.to,
+                        hop.status as i64,
+                    ],
+                )?;
+            }
             Ok(())
         })?;
         Ok(())
@@ -1542,6 +1672,16 @@ fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
             params![8, now_secs()],
         )
         .map_err(|err| StoreError::migration(err.to_string()))?;
+        current = 8;
+    }
+    if current < 9 {
+        tx.execute_batch(MIGRATION_9)
+            .map_err(|err| StoreError::migration(err.to_string()))?;
+        tx.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (?1, ?2)",
+            params![9, now_secs()],
+        )
+        .map_err(|err| StoreError::migration(err.to_string()))?;
     }
     tx.commit()
         .map_err(|err| StoreError::migration(err.to_string()))?;
@@ -1691,6 +1831,8 @@ fn load_run_from(conn: &Connection, run_id: i64) -> Result<LoadedRun, StoreError
         findings,
         observations,
         resource_fetches: load_resource_fetches(conn, run_id)?,
+        tls_inspections: load_tls_inspections(conn, run_id)?,
+        host_probes: load_host_probes(conn, run_id)?,
     })
 }
 
@@ -1917,6 +2059,146 @@ fn load_resource_fetches(conn: &Connection, run_id: i64) -> Result<Vec<ResourceF
         });
     }
     Ok(fetches)
+}
+
+fn load_tls_inspections(conn: &Connection, run_id: i64) -> Result<Vec<TlsInspection>, StoreError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT host, port, inspected, verified, hostname_ok, not_before_unix,
+                    not_after_unix, names, error, credentials_attached
+             FROM tls_inspections WHERE run_id = ?1 ORDER BY host, port",
+        )
+        .map_err(map_write)?;
+    let rows = stmt
+        .query_map(params![run_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, Option<i64>>(5)?,
+                row.get::<_, Option<i64>>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, Option<String>>(8)?,
+                row.get::<_, i64>(9)?,
+            ))
+        })
+        .map_err(map_write)?;
+    let mut inspections = Vec::new();
+    for row in rows {
+        let (
+            host,
+            port,
+            inspected,
+            verified,
+            hostname_ok,
+            not_before_unix,
+            not_after_unix,
+            names,
+            error,
+            credentials_attached,
+        ) = row.map_err(map_write)?;
+        inspections.push(TlsInspection {
+            host,
+            port: port as u16,
+            inspected: inspected != 0,
+            verified: verified != 0,
+            hostname_ok: hostname_ok != 0,
+            not_before_unix,
+            not_after_unix,
+            names: split_lines(&names),
+            error,
+            credentials_attached: credentials_attached != 0,
+        });
+    }
+    Ok(inspections)
+}
+
+fn load_host_probes(conn: &Connection, run_id: i64) -> Result<Vec<HostProbe>, StoreError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT kind, requested_url, destination_url, status, canonicals,
+                    failed_reason, credentials_attached
+             FROM host_probes WHERE run_id = ?1 ORDER BY kind",
+        )
+        .map_err(map_write)?;
+    let rows = stmt
+        .query_map(params![run_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, i64>(6)?,
+            ))
+        })
+        .map_err(map_write)?;
+    let mut collected = Vec::new();
+    for row in rows {
+        collected.push(row.map_err(map_write)?);
+    }
+    drop(stmt);
+    let mut probes = Vec::new();
+    for (
+        kind,
+        requested_url,
+        destination_url,
+        status,
+        canonicals,
+        failed_reason,
+        credentials_attached,
+    ) in collected
+    {
+        let kind = HostProbeKind::parse(&kind)
+            .ok_or_else(|| StoreError::other(format!("unknown host probe kind {kind}")))?;
+        let redirect_chain = load_host_probe_redirects(conn, run_id, kind.as_str())?;
+        probes.push(HostProbe {
+            kind,
+            requested_url,
+            destination_url,
+            status: status.map(|value| value as u16),
+            redirect_chain,
+            canonicals: split_lines(&canonicals),
+            failed_reason,
+            credentials_attached: credentials_attached != 0,
+        });
+    }
+    Ok(probes)
+}
+
+fn load_host_probe_redirects(
+    conn: &Connection,
+    run_id: i64,
+    kind: &str,
+) -> Result<Vec<RedirectHop>, StoreError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT from_url, to_url, status FROM host_probe_redirects
+             WHERE run_id = ?1 AND kind = ?2 ORDER BY seq",
+        )
+        .map_err(map_write)?;
+    let rows = stmt
+        .query_map(params![run_id, kind], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })
+        .map_err(map_write)?;
+    let mut hops = Vec::new();
+    for row in rows {
+        let (from, to, status) = row.map_err(map_write)?;
+        hops.push(RedirectHop {
+            from,
+            to,
+            status: status as u16,
+        });
+    }
+    Ok(hops)
 }
 
 fn load_sitemap(conn: &Connection, run_id: i64) -> Result<SitemapInventory, StoreError> {
