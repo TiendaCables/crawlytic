@@ -55,7 +55,7 @@ locations are recorded and never receive credentials.
 
 ## Boundaries
 
-- `crawlytic-core`: profile, URL identity/scope, robots policy, Web Bot Auth transport, bounded crawl, homepage/sitemap discovery, SQLite run persistence, versioned page/link/resource extraction, evidence-based rule execution and finding lifecycle, HTML metadata, link/URL-shape, canonical/indexability, crawl-depth/orphan, resource, hreflang/lang and duplicate-content checkers, typed start/cancel/resume commands with coalesced progress events, run listing for resume, CSV/JSON audit export, and a read-only generic CSV baseline importer; no terminal dependency.
+- `crawlytic-core`: profile, URL identity/scope, robots policy, Web Bot Auth transport, bounded crawl, homepage/sitemap discovery, SQLite run persistence, versioned page/link/resource extraction, evidence-based rule execution and finding lifecycle, HTML metadata, link/URL-shape, canonical/indexability, crawl-depth/orphan, resource, hreflang/lang, duplicate-content and structured-data checkers, typed start/cancel/resume commands with coalesced progress events, run listing for resume, CSV/JSON audit export, and a read-only generic CSV baseline importer; no terminal dependency.
 - `crawlytic`: Ratatui rendering, key input, profile/auth screens, run/URL/finding investigation and background-task coordination.
 - Future interfaces can use the core without depending on Ratatui. The displayed user agent is the HTTP User-Agent string, not a browser viewport.
 
@@ -67,7 +67,7 @@ headers, same-origin HTTPS redirects, one connection retry, Signature-Input expi
 metadata, 401/403/429 diagnostics that separate observation from suspected cause,
 HTTP/TLS fixtures for header destinations, robots access policy as a separate layer
 (user-agent groups, wildcards, encodings, failed fetches, sitemap declarations),
-bounded signed sample of page/robots/sitemap, responsive terminal status, versioned
+bounded signed sample of page (1 MiB HTML), robots and sitemap, responsive terminal status, versioned
 rule catalogue v1 (97 transcribed checks plus limited AMP remainder, fixture contract,
 six result states), bounded async crawl (frontier, worker pool, per-origin pace for
 `crawl_delay = minimum`, independent URL/queue/response-size caps, 429/503 Retry-After
@@ -76,10 +76,10 @@ homepage-link discovery and independent sitemap inventory (indexes, gzip, size/d
 bounds, cross-origin locations refused without forwarding credentials),
 SQLite persistence for runs, sanitized profile snapshots, URL states, fetch evidence,
 links, resource references, sitemap membership and idempotent findings. Versioned page,
-link and resource observations (schema v3) extracted from fetched bodies so later rules
+link and resource observations (schema v4) extracted from fetched bodies so later rules
 share evidence without refetching: titles, descriptions, headings, robots meta/headers,
 canonicals, hreflang/lang, viewport, doctype, encoding, declared charset, frames,
-legacy plugin markup, meta refresh, redirect hops, text (nav/header/footer/aside chrome omitted),
+legacy plugin markup, meta refresh, JSON-LD blocks, Microdata/RDFa type inventory, redirect hops, text (nav/header/footer/aside chrome omitted),
 anchors/rel (image-only anchors use img alt) and
 images/scripts/styles, plus status, timings, content type, raw versus decoded sizes and
 completeness. Truncated, challenge, error and non-HTML bodies cannot be marked complete.
@@ -112,8 +112,9 @@ character page-URL threshold is the inventory baseline. Unfetched link targets s
 never `passed`. Crawl-depth checkers build a directed homepage `<a href>` graph: shortest-path
 click depth with a reproducible path, unique referring pages, one-inbound pages, and sitemap
 URLs with no observed internal inbound link. Canonicals, assets and sitemap membership never
-create a navigation edge. Incomplete crawls label sitemap orphan *candidates* rather than
-definite site-wide orphans. `max_clicks` defaults to 3 (inventory baseline, not a Semrush
+create a navigation edge. Incomplete crawls record one coverage-qualified sitemap orphan
+*candidate* summary rather than one row per unfetched sitemap URL. Out-of-scope sitemap
+entries are skipped. Duplicate listings share one identity. `max_clicks` defaults to 3 (inventory baseline, not a Semrush
 formula). Hreflang checkers evaluate stored observations for BCP 47/`x-default` syntax, per-source
 language conflicts, target status, missing return links, missing self-references, and
 canonical/noindex inconsistency. Failed relationships attach source and target evidence.
@@ -129,8 +130,12 @@ bands so comparisons stay bounded at a 20k URL cap (`near_duplicate_max_hamming=
 Reports include group method, fingerprint/hamming evidence and canonical/indexability context.
 Product variants that keep distinct main copy are not grouped. Truncated, non-HTML, challenge, error
 and robots-blocked responses never enter normal groups. Thresholds are Crawlytic heuristics, not
-Semrush formulas; near-duplicate grouping is transitive and uncertain. Other inventory checkers are
-not shipped; unregistered catalogue rules stay `unsupported`. Current 14
+Semrush formulas; near-duplicate grouping is transitive and uncertain. Structured-data checkers parse
+JSON-LD only (validator v1: Product, Offer, BreadcrumbList, Organization). Syntax, vocabulary and
+search-feature findings stay separate and point at item type, path and field. Microdata and RDFa are
+inventoried and reported as uncovered rather than passed. Local validation does not determine Google
+rich-result eligibility or actual search appearance. Other inventory checkers are not shipped;
+unregistered catalogue rules stay `unsupported`. Current 14
 September 2026 findings are stored separately from the historical "new issues" column.
 No-count rows are not failures. Evaluated runs export CSV and JSON with stable finding
 identities, severity, unit, URL, evidence, status and run coverage. Formula-leading cells
@@ -149,7 +154,7 @@ Signature-Input values. Disk-full and migration failures are visible and leave t
 incomplete. Raw HTML retention is off by default and quota-bounded when enabled. An
 uncommitted writer batch (default 32 statements) can be lost on crash.
 
-Not implemented: remaining inventory checkers beyond the shipped HTML/link/indexability/navigation/resource/hreflang/duplicate-content set, cross-run finding history,
+Not implemented: remaining inventory checkers beyond the shipped HTML/link/indexability/navigation/resource/hreflang/duplicate-content/structured-data set, cross-run finding history,
 scheduling, a credential vault (masked process-environment setup only), mobile rendering or JS.
 The page cap (20,000) and historical 3,725-page observation are not catalogue size.
 Weekly Monday is recorded without a time, timezone, or scheduler.
@@ -221,10 +226,10 @@ access limitation, content-type-based resources-as-page-links without Semrush pa
 >200 character baseline, quoted heuristic thresholds, and incomplete evidence when a
 target was not fetched. Crawl-depth fixtures cover diamond/cycle/disconnected shortest paths,
 canonical/asset/sitemap edges that never count as inbound, a reproducible homepage path in
-depth findings, and coverage-qualified sitemap orphan candidates. Hreflang fixtures cover multi-locale
+depth findings, coverage-qualified sitemap orphan summaries, and duplicate/out-of-scope sitemap URLs that do not multiply findings. Hreflang fixtures cover multi-locale
 and `x-default` clusters, absent return links, inaccessible targets, invalid BCP 47 tags, source
 conflicts, `html lang` without hreflang on a single-language page, content-language heuristic
-confidence, and unsigned cross-host locale fetches that never attach credentials. Export fixtures cover quotes, Unicode,
+confidence, and unsigned cross-host locale fetches that never attach credentials. Structured-data fixtures cover JSON-LD arrays and `@graph`, multiple offers, malformed JSON, missing required properties, Microdata/RDFa inventory that does not pass, unsupported types, and recommendations that do not promise Google rich results or appearance. Export fixtures cover quotes, Unicode,
 formula injection, stable finding identities, coverage reconciliation, secret refusal, and
 read-only CSV import that separates aggregate counts from entity rows and historical deltas.
 The Semrush workbook adapter stays blocked without inspecting unsupplied XLSX bytes. They do not contact the storefront.

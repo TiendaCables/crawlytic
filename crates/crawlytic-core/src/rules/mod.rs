@@ -2,9 +2,9 @@
 //!
 //! HTML metadata (TC-458), link/URL-shape (TC-459), canonical/indexability
 //! (TC-460), crawl-depth/orphan (TC-461), image/script/style (TC-462),
-//! hreflang/lang (TC-465) and duplicate-content (TC-466) checkers live here.
-//! Other catalogue stages stay unregistered and resolve to
-//! [`crate::catalogue::RuleState::Unsupported`].
+//! hreflang/lang (TC-465), duplicate-content (TC-466) and structured-data
+//! (TC-467) checkers live here. Other catalogue stages stay unregistered and
+//! resolve to [`crate::catalogue::RuleState::Unsupported`].
 
 mod content;
 mod hreflang;
@@ -13,6 +13,7 @@ mod links;
 mod meta;
 mod navigation;
 mod resources;
+mod structured;
 
 pub use content::{
     DEFAULT_BOILERPLATE_MIN_PAGES, DEFAULT_MIN_MAIN_TOKENS, DEFAULT_NEAR_DUPLICATE_MAX_HAMMING,
@@ -40,6 +41,11 @@ pub use navigation::{
     navigation_registry, register_navigation,
 };
 pub use resources::{register_resource_audit, resource_audit_registry};
+pub use structured::{
+    JSON_LD_COVERAGE, MICRODATA_COVERAGE, RDFA_COVERAGE, SEARCH_FEATURE_RULE_VERSION,
+    STRUCTURED_DATA_VALIDATOR_VERSION, VOCABULARY_RULE_VERSION, register_structured_data,
+    structured_data_registry,
+};
 
 use crate::audit::Registry;
 
@@ -52,5 +58,6 @@ pub fn audit_registry() -> Registry {
     register_resource_audit(&mut registry);
     register_hreflang(&mut registry);
     register_content(&mut registry);
+    register_structured_data(&mut registry);
     registry
 }

@@ -331,6 +331,7 @@ fn render_urls(frame: &mut Frame, area: Rect, app: &App) {
 fn render_findings(frame: &mut Frame, area: Rect, app: &App) {
     let [list, detail] =
         Layout::vertical([Constraint::Percentage(55), Constraint::Percentage(45)]).areas(area);
+    let visible: std::collections::HashSet<_> = app.visible_finding_cursors().into_iter().collect();
     let mut lines = Vec::new();
     if app.investigation.finding_count() == 0
         && app.investigation.incomplete.is_empty()
@@ -352,7 +353,7 @@ fn render_findings(frame: &mut Frame, area: Rect, app: &App) {
                     rule: rule_idx,
                     finding: finding_idx,
                 };
-                if !app.visible_finding_cursors().contains(&cursor) {
+                if !visible.contains(&cursor) {
                     continue;
                 }
                 let mark = if app.findings_cursor == Some(cursor) {
@@ -370,10 +371,7 @@ fn render_findings(frame: &mut Frame, area: Rect, app: &App) {
     if !app.investigation.incomplete.is_empty() {
         lines.push(Line::from("incomplete"));
         for (index, section) in app.investigation.incomplete.iter().enumerate() {
-            if !app
-                .visible_finding_cursors()
-                .contains(&FindingsCursor::Incomplete(index))
-            {
+            if !visible.contains(&FindingsCursor::Incomplete(index)) {
                 continue;
             }
             let mark = if app.findings_cursor == Some(FindingsCursor::Incomplete(index)) {
@@ -387,10 +385,7 @@ fn render_findings(frame: &mut Frame, area: Rect, app: &App) {
     if !app.investigation.unsupported.is_empty() {
         lines.push(Line::from("unsupported"));
         for (index, section) in app.investigation.unsupported.iter().enumerate() {
-            if !app
-                .visible_finding_cursors()
-                .contains(&FindingsCursor::Unsupported(index))
-            {
+            if !visible.contains(&FindingsCursor::Unsupported(index)) {
                 continue;
             }
             let mark = if app.findings_cursor == Some(FindingsCursor::Unsupported(index)) {

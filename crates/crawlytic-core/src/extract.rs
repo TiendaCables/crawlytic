@@ -6,7 +6,7 @@
 
 use url::Url;
 
-pub const EXTRACTION_SCHEMA_VERSION: u32 = 3;
+pub const EXTRACTION_SCHEMA_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ObservationFlags {
@@ -79,6 +79,42 @@ impl EmbeddedKind {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StructuredFormat {
+    JsonLd,
+    Microdata,
+    Rdfa,
+}
+
+impl StructuredFormat {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::JsonLd => "json_ld",
+            Self::Microdata => "microdata",
+            Self::Rdfa => "rdfa",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "json_ld" => Some(Self::JsonLd),
+            "microdata" => Some(Self::Microdata),
+            "rdfa" => Some(Self::Rdfa),
+            _ => None,
+        }
+    }
+}
+
+/// Structured-data block as observed in HTML. JSON-LD keeps the raw text so
+/// syntax errors stay visible. Microdata and RDFa are inventory-only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StructuredBlock {
+    pub format: StructuredFormat,
+    pub index: u32,
+    pub raw: String,
+    pub types: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Heading {
     pub level: u8,
@@ -122,6 +158,7 @@ pub struct PageObservation {
     pub has_frames: bool,
     pub has_plugin_markup: bool,
     pub meta_refresh: Vec<String>,
+    pub structured: Vec<StructuredBlock>,
     pub text: String,
 }
 
@@ -237,6 +274,7 @@ pub fn extract(input: &ExtractInput<'_>) -> ExtractedObservations {
         has_frames: false,
         has_plugin_markup: false,
         meta_refresh: Vec::new(),
+        structured: Vec::new(),
         text: String::new(),
     };
 
@@ -528,6 +566,14 @@ fn parse_html(
             }
             continue;
         }
+        if bytes[i] == b'<'
+            && !starts_with_ignore_ascii(bytes, i, b"</")
+            && !starts_with_ignore_ascii(bytes, i, b"<!")
+            && !starts_with_ignore_ascii(bytes, i, b"<?")
+            && let Some((_, attrs)) = read_tag(bytes, i)
+        {
+            inventory_embedded_structured(page, &attrs);
+        }
         if tag_opens(bytes, i, b"script") {
             if let Some((end, attrs)) = read_tag(bytes, i) {
                 if let Some(src) = attr(&attrs, "src") {
@@ -541,7 +587,13 @@ fn parse_html(
                         None,
                     );
                 }
-                i = skip_element_from(bytes, end, b"script");
+                if is_json_ld_type(attr(&attrs, "type").as_deref()) {
+                    let (inner, next) = read_until_close(bytes, end, b"script");
+                    push_json_ld(page, inner);
+                    i = next;
+                } else {
+                    i = skip_element_from(bytes, end, b"script");
+                }
             } else {
                 i += 1;
             }
@@ -1099,6 +1151,72 @@ fn accessible_name(inner: &str) -> String {
     alts.join(" ")
 }
 
+fn is_json_ld_type(value: Option<&str>) -> bool {
+    let Some(value) = value else {
+        return false;
+    };
+    let media = value
+        .split(';')
+        .next()
+        .unwrap_or(value)
+        .trim()
+        .to_ascii_lowercase();
+    media == "application/ld+json"
+}
+
+fn next_structured_index(page: &PageObservation, format: StructuredFormat) -> u32 {
+    page.structured
+        .iter()
+        .filter(|block| block.format == format)
+        .count() as u32
+}
+
+fn split_type_tokens(value: &str) -> Vec<String> {
+    value
+        .split_whitespace()
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn inventory_embedded_structured(page: &mut PageObservation, attrs: &str) {
+    if attr(attrs, "itemscope").is_some() || attr(attrs, "itemtype").is_some() {
+        let types = attr(attrs, "itemtype")
+            .map(|value| split_type_tokens(&value))
+            .unwrap_or_default();
+        let index = next_structured_index(page, StructuredFormat::Microdata);
+        page.structured.push(StructuredBlock {
+            format: StructuredFormat::Microdata,
+            index,
+            raw: String::new(),
+            types,
+        });
+    }
+    if attr(attrs, "typeof").is_some() {
+        let types = attr(attrs, "typeof")
+            .map(|value| split_type_tokens(&value))
+            .unwrap_or_default();
+        let index = next_structured_index(page, StructuredFormat::Rdfa);
+        page.structured.push(StructuredBlock {
+            format: StructuredFormat::Rdfa,
+            index,
+            raw: String::new(),
+            types,
+        });
+    }
+}
+
+fn push_json_ld(page: &mut PageObservation, inner: String) {
+    let index = next_structured_index(page, StructuredFormat::JsonLd);
+    page.structured.push(StructuredBlock {
+        format: StructuredFormat::JsonLd,
+        index,
+        raw: inner.trim().to_owned(),
+        types: Vec::new(),
+    });
+}
+
 fn skip_element(bytes: &[u8], start: usize, name: &[u8]) -> usize {
     let Some((end, _)) = read_tag(bytes, start) else {
         return start + 1;
@@ -1638,6 +1756,82 @@ mod tests {
         assert!(!lower.contains("ratatui"));
         assert!(!lower.contains("warning"));
         assert!(!lower.contains("finding"));
-        assert_eq!(EXTRACTION_SCHEMA_VERSION, 3);
+        assert_eq!(EXTRACTION_SCHEMA_VERSION, 4);
+    }
+
+    #[test]
+    fn json_ld_arrays_graph_and_malformed_blocks_are_extracted() {
+        let obs = extract_html(
+            r#"<!DOCTYPE html><html><head>
+              <script type="application/ld+json">
+              {
+                "@context": "https://schema.org",
+                "@graph": [
+                  {"@type": "Organization", "name": "Tienda Cables"},
+                  {"@type": "Product", "name": "USB-C cable",
+                   "offers": [
+                     {"@type": "Offer", "price": "9.99", "priceCurrency": "EUR"},
+                     {"@type": "Offer", "price": "8.50", "priceCurrency": "EUR"}
+                   ]}
+                ]
+              }
+              </script>
+              <script type="application/ld+json">[{"@type":"BreadcrumbList"}]</script>
+              <script type="application/ld+json">{ "name": </script>
+            </head><body></body></html>"#,
+        );
+        let json_ld: Vec<_> = obs
+            .page
+            .structured
+            .iter()
+            .filter(|block| block.format == StructuredFormat::JsonLd)
+            .collect();
+        assert_eq!(json_ld.len(), 3, "{json_ld:?}");
+        assert!(json_ld[0].raw.contains("@graph"));
+        assert!(json_ld[0].raw.contains("USB-C cable"));
+        assert_eq!(json_ld[0].index, 0);
+        assert!(json_ld[1].raw.contains("BreadcrumbList"));
+        assert_eq!(json_ld[1].index, 1);
+        assert!(json_ld[2].raw.contains("\"name\":"));
+        assert_eq!(json_ld[2].index, 2);
+        assert!(!obs.page.text.contains("@graph"));
+    }
+
+    #[test]
+    fn microdata_and_rdfa_are_inventoried_not_parsed_as_json_ld() {
+        let obs = extract_html(
+            r#"<!DOCTYPE html><html><body>
+              <div itemscope itemtype="https://schema.org/Product">
+                <span itemprop="name">HDMI cable</span>
+              </div>
+              <div vocab="https://schema.org/" typeof="Organization">
+                <span property="name">Tienda Cables</span>
+              </div>
+            </body></html>"#,
+        );
+        let microdata: Vec<_> = obs
+            .page
+            .structured
+            .iter()
+            .filter(|block| block.format == StructuredFormat::Microdata)
+            .collect();
+        let rdfa: Vec<_> = obs
+            .page
+            .structured
+            .iter()
+            .filter(|block| block.format == StructuredFormat::Rdfa)
+            .collect();
+        assert_eq!(microdata.len(), 1, "{microdata:?}");
+        assert_eq!(microdata[0].raw, "");
+        assert!(microdata[0].types.iter().any(|t| t.contains("Product")));
+        assert_eq!(rdfa.len(), 1, "{rdfa:?}");
+        assert_eq!(rdfa[0].raw, "");
+        assert!(rdfa[0].types.iter().any(|t| t.contains("Organization")));
+        assert!(
+            !obs.page
+                .structured
+                .iter()
+                .any(|block| block.format == StructuredFormat::JsonLd)
+        );
     }
 }
