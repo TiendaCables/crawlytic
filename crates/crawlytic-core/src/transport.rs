@@ -1,4 +1,5 @@
 use crate::auth::{CRYPTO_VERIFICATION_LIMITATION, WebBotAuth};
+use crate::extract::RedirectHop;
 use crate::profile::Profile;
 use crate::robots::{RobotsFile, RobotsRunMetadata, UrlAccess};
 use anyhow::{Context, Result};
@@ -36,6 +37,7 @@ pub struct FetchRecord {
     pub duration_ms: u64,
     pub robots_tag_headers: Vec<String>,
     pub link_headers: Vec<String>,
+    pub redirect_chain: Vec<RedirectHop>,
 }
 
 #[derive(Debug)]
@@ -203,11 +205,17 @@ impl SignedTransport {
         let mut current = url.clone();
         self.authorize(&current)?;
         let mut redirects = 0;
+        let mut redirect_chain = Vec::new();
         loop {
             let response = self.send_signed(&current).await?;
             let status = response.status();
             if status.is_redirection() {
                 let next = self.redirect_target(&current, &response)?;
+                redirect_chain.push(RedirectHop {
+                    from: current.to_string(),
+                    to: next.to_string(),
+                    status: status.as_u16(),
+                });
                 redirects += 1;
                 if redirects > MAX_REDIRECTS {
                     return Err(AccessError::with_cause(
@@ -256,6 +264,7 @@ impl SignedTransport {
                     duration_ms: started.elapsed().as_millis() as u64,
                     robots_tag_headers,
                     link_headers,
+                    redirect_chain,
                 },
                 sample,
             ));
@@ -984,6 +993,10 @@ lists_complete = false
             .unwrap();
         assert_eq!(ok.destination_url.path(), "/dest");
         assert!(ok.credentials_attached);
+        assert_eq!(ok.redirect_chain.len(), 1);
+        assert_eq!(ok.redirect_chain[0].status, 302);
+        assert!(ok.redirect_chain[0].from.ends_with("/same"));
+        assert!(ok.redirect_chain[0].to.ends_with("/dest"));
 
         let away = t
             .fetch(&origin_path(&approved.url(), "/away"), ResourceKind::Page)

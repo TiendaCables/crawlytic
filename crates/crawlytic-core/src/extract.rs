@@ -6,7 +6,7 @@
 
 use url::Url;
 
-pub const EXTRACTION_SCHEMA_VERSION: u32 = 2;
+pub const EXTRACTION_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ObservationFlags {
@@ -92,6 +92,13 @@ pub struct Hreflang {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RedirectHop {
+    pub from: String,
+    pub to: String,
+    pub status: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PageObservation {
     pub schema_version: u32,
     pub flags: ObservationFlags,
@@ -114,6 +121,7 @@ pub struct PageObservation {
     pub viewport: Option<String>,
     pub has_frames: bool,
     pub has_plugin_markup: bool,
+    pub meta_refresh: Vec<String>,
     pub text: String,
 }
 
@@ -151,6 +159,7 @@ pub struct ExtractedObservations {
     pub page: PageObservation,
     pub links: Vec<LinkObservation>,
     pub resources: Vec<ResourceObservation>,
+    pub redirect_chain: Vec<RedirectHop>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -213,6 +222,7 @@ pub fn extract(input: &ExtractInput<'_>) -> ExtractedObservations {
         viewport: None,
         has_frames: false,
         has_plugin_markup: false,
+        meta_refresh: Vec::new(),
         text: String::new(),
     };
 
@@ -235,6 +245,7 @@ pub fn extract(input: &ExtractInput<'_>) -> ExtractedObservations {
         page,
         links,
         resources,
+        redirect_chain: Vec::new(),
     }
 }
 
@@ -597,7 +608,7 @@ fn parse_html(
             if let Some((end, attrs)) = read_tag(bytes, i) {
                 let (inner, next) = read_until_close(bytes, end, b"a");
                 if let Some(href) = attr(&attrs, "href") {
-                    let anchor = normalize_space(&decode_entities(&strip_tags(&inner)));
+                    let anchor = accessible_name(&inner);
                     let rel = attr(&attrs, "rel").unwrap_or_default();
                     push_link(
                         links,
@@ -730,6 +741,9 @@ fn apply_meta(page: &mut PageObservation, attrs: &str) {
         }
         "content-type" if charset_from_content_type(&content).is_some() => {
             page.charset_declared = true;
+        }
+        "refresh" if !content.trim().is_empty() => {
+            page.meta_refresh.push(content.trim().to_owned());
         }
         _ => {}
     }
@@ -977,6 +991,32 @@ fn tag_opens(bytes: &[u8], i: usize, name: &[u8]) -> bool {
     }
     let after = j + name.len();
     after == bytes.len() || matches!(bytes[after], b' ' | b'\t' | b'\n' | b'\r' | b'/' | b'>')
+}
+
+fn accessible_name(inner: &str) -> String {
+    let text = normalize_space(&decode_entities(&strip_tags(inner)));
+    if !text.is_empty() {
+        return text;
+    }
+    let bytes = inner.as_bytes();
+    let mut i = 0;
+    let mut alts = Vec::new();
+    while i < bytes.len() {
+        if tag_opens(bytes, i, b"img")
+            && let Some((end, attrs)) = read_tag(bytes, i)
+        {
+            if let Some(alt) = attr(&attrs, "alt") {
+                let alt = normalize_space(&decode_entities(&alt));
+                if !alt.is_empty() {
+                    alts.push(alt);
+                }
+            }
+            i = end;
+            continue;
+        }
+        i += 1;
+    }
+    alts.join(" ")
 }
 
 fn skip_element(bytes: &[u8], start: usize, name: &[u8]) -> usize {
@@ -1346,6 +1386,34 @@ mod tests {
     }
 
     #[test]
+    fn image_only_anchors_use_img_alt_as_accessible_name() {
+        let obs = extract_html(
+            r#"<html><body>
+              <a href="/named"><img src="/a.png" alt="Buy cables"></a>
+              <a href="/empty"><img src="/b.png"></a>
+              <a href="/text"><img src="/c.png" alt="ignored"> Visible </a>
+            </body></html>"#,
+        );
+        let named = obs.links.iter().find(|link| link.href == "/named").unwrap();
+        assert_eq!(named.anchor, "Buy cables");
+        let empty = obs.links.iter().find(|link| link.href == "/empty").unwrap();
+        assert_eq!(empty.anchor, "");
+        let text = obs.links.iter().find(|link| link.href == "/text").unwrap();
+        assert_eq!(text.anchor, "Visible");
+    }
+
+    #[test]
+    fn meta_refresh_is_extracted_from_http_equiv() {
+        let obs = extract_html(
+            r#"<html><head><meta http-equiv="refresh" content="0;url=/next"></head><body></body></html>"#,
+        );
+        assert_eq!(obs.page.meta_refresh, ["0;url=/next"]);
+        let none = extract_html("<html><head></head><body></body></html>");
+        assert!(none.page.meta_refresh.is_empty());
+        assert!(none.redirect_chain.is_empty());
+    }
+
+    #[test]
     fn resources_record_kind_alt_and_host_ownership() {
         let obs = extract_html(
             r#"<html><head>
@@ -1463,6 +1531,6 @@ mod tests {
         assert!(!lower.contains("ratatui"));
         assert!(!lower.contains("warning"));
         assert!(!lower.contains("finding"));
-        assert_eq!(EXTRACTION_SCHEMA_VERSION, 2);
+        assert_eq!(EXTRACTION_SCHEMA_VERSION, 3);
     }
 }
