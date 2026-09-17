@@ -49,7 +49,7 @@ locations are recorded and never receive credentials.
 
 ## Boundaries
 
-- `crawlytic-core`: profile, URL identity/scope, robots policy, Web Bot Auth transport, bounded crawl, homepage/sitemap discovery, SQLite run persistence, versioned page/link/resource extraction, evidence-based rule execution and finding lifecycle, and typed start/cancel/resume commands with coalesced progress events; no terminal dependency.
+- `crawlytic-core`: profile, URL identity/scope, robots policy, Web Bot Auth transport, bounded crawl, homepage/sitemap discovery, SQLite run persistence, versioned page/link/resource extraction, evidence-based rule execution and finding lifecycle, HTML metadata checkers, and typed start/cancel/resume commands with coalesced progress events; no terminal dependency.
 - `crawlytic`: Ratatui rendering, key input and background-task coordination.
 - Future interfaces can use the core without depending on Ratatui. The displayed user agent is the HTTP User-Agent string, not a browser viewport.
 
@@ -70,9 +70,10 @@ homepage-link discovery and independent sitemap inventory (indexes, gzip, size/d
 bounds, cross-origin locations refused without forwarding credentials),
 SQLite persistence for runs, sanitized profile snapshots, URL states, fetch evidence,
 links, resource references, sitemap membership and idempotent findings. Versioned page,
-link and resource observations (schema v1) extracted from fetched bodies so later rules
+link and resource observations (schema v2) extracted from fetched bodies so later rules
 share evidence without refetching: titles, descriptions, headings, robots meta/headers,
-canonicals, hreflang/lang, viewport, doctype, encoding, text, anchors/rel and
+canonicals, hreflang/lang, viewport, doctype, encoding, declared charset, frames,
+legacy plugin markup, text, anchors/rel and
 images/scripts/styles, plus status, timings, content type, raw versus decoded sizes and
 completeness. Truncated, challenge, error and non-HTML bodies cannot be marked complete.
 The extraction schema has no severity or UI fields. Typed crawl
@@ -84,8 +85,14 @@ stays in SQLite; events are a live view. The displayed user agent is not a viewp
 rule engine evaluates registered checkers against stored observations with no recrawl. Findings
 use a stable rule-plus-entity identity and keep fact, recommendation and severity separate.
 Missing prerequisites resolve to `incomplete` or `unsupported`, never `passed`. Scoped
-suppressions require a reason, are auditable, and do not delete evidence. Inventory checkers
-are not shipped; unregistered catalogue rules stay `unsupported`. Current 14
+suppressions require a reason, are auditable, and do not delete evidence. HTML metadata checkers evaluate stored observations for titles, descriptions, headings,
+viewport, charset, doctype, oversized HTML, frames and plugin markup. Missing versus
+intentionally empty titles and descriptions stay distinct. Duplicate groups carry
+canonical and indexability context and are compared by affected URL set. Threshold
+recommendations quote `max_title_chars`, `min_title_chars` and `max_html_bytes`
+(Crawlytic heuristics, not Semrush formulas). The 14 September 2026 5-page duplicate-description
+and 73-page long-title totals remain historical catalogue metadata; they are not live URL lists.
+Other inventory checkers are not shipped; unregistered catalogue rules stay `unsupported`. Current 14
 September 2026 findings are stored separately from the historical "new issues" column.
 No-count rows are not failures. Duplicate fetch identities are scheduled once. Every URL
 ends fetched, excluded, blocked, failed or pending with a reason. A cancelled run is not
@@ -96,7 +103,7 @@ Signature-Input values. Disk-full and migration failures are visible and leave t
 incomplete. Raw HTML retention is off by default and quota-bounded when enabled. An
 uncommitted writer batch (default 32 statements) can be lost on crash.
 
-Not implemented: inventory rule checkers, cross-run finding history,
+Not implemented: remaining inventory checkers (links, canonicals, images, …), cross-run finding history,
 scheduling, credential editing/storage, mobile rendering or JS.
 The page cap (20,000) and historical 3,725-page observation are not catalogue size.
 Weekly Monday is recorded without a time, timezone, or scheduler.
@@ -112,7 +119,7 @@ lists it as an ignored parameter. Path slash variants and query order stay disti
 ## Next milestones
 
 1. Shortest-path depth from the homepage graph; sitemaps stay separate evidence.
-2. Inventory rule checkers over stored observations (titles, links, canonicals); then the broader Semrush catalogue.
+2. Remaining inventory checkers over stored observations (links, canonicals, images); then the broader Semrush catalogue.
 3. Cross-run history, scheduled headless runs and exports. A web UI can follow independently.
 
 Recorded TiendaCables settings: www.tiendacables.com; 20,000 page cap; 3,725-page
@@ -154,8 +161,12 @@ optional HTML quotas, and visible disk-full/migration failures that leave partia
 incomplete. Rule-execution fixtures cover stable finding identities, incomplete/unsupported
 prerequisites that never pass, fact/recommendation/severity separation, stored-observation
 reruns without a recrawl, and auditable suppressions that keep evidence. Extraction fixtures cover missing/multiple tags, malformed HTML, non-HTML
-responses, encoding fallback, link/resource host ownership, and truncated/challenge/error
-bodies that stay incomplete. They do not contact the storefront.
+responses, encoding fallback, declared charset, frames versus iframe, plugin markup,
+link/resource host ownership, and truncated/challenge/error
+bodies that stay incomplete. HTML metadata fixtures cover missing versus empty titles
+and descriptions, duplicate groups with canonical/indexability context, quoted
+thresholds, headings, viewport width, doctype, oversized HTML, and URL-set comparison
+against the historical 5/73 totals without fabricating storefront URLs. They do not contact the storefront.
 
 A user-reported or local `p` sample is operator evidence only. It is not recorded in
 this repository, is not covered by the default `cargo test` run, and is not proof that

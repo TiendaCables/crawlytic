@@ -7,6 +7,7 @@ mod engine;
 mod extract;
 mod profile;
 mod robots;
+mod rules;
 mod scope;
 mod store;
 mod transport;
@@ -46,6 +47,10 @@ pub use profile::{
 pub use robots::{
     AllowReason, BlockKind, BlockedEvidence, RobotsCache, RobotsFetchState, RobotsFile,
     RobotsRunMetadata, UrlAccess, evaluate_url, product_token,
+};
+pub use rules::{
+    DEFAULT_MAX_HTML_BYTES, DEFAULT_MAX_TITLE_CHARS, DEFAULT_MIN_TITLE_CHARS,
+    html_metadata_registry, normalize_meta, register_html_metadata,
 };
 pub use scope::{
     ClassifiedUrl, Coverage, CoverageLink, CoverageUrl, FetchIdentity, SKIP_MALFORMED,

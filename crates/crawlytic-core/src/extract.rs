@@ -6,7 +6,7 @@
 
 use url::Url;
 
-pub const EXTRACTION_SCHEMA_VERSION: u32 = 1;
+pub const EXTRACTION_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ObservationFlags {
@@ -101,6 +101,7 @@ pub struct PageObservation {
     pub raw_bytes: u64,
     pub decoded_bytes: u64,
     pub encoding: String,
+    pub charset_declared: bool,
     pub doctype: Option<String>,
     pub html_lang: Option<String>,
     pub titles: Vec<String>,
@@ -111,6 +112,8 @@ pub struct PageObservation {
     pub canonicals: Vec<String>,
     pub hreflangs: Vec<Hreflang>,
     pub viewport: Option<String>,
+    pub has_frames: bool,
+    pub has_plugin_markup: bool,
     pub text: String,
 }
 
@@ -197,6 +200,7 @@ pub fn extract(input: &ExtractInput<'_>) -> ExtractedObservations {
         raw_bytes: input.body.len() as u64,
         decoded_bytes,
         encoding,
+        charset_declared: charset_declared(input.content_type, input.body),
         doctype: None,
         html_lang: None,
         titles: Vec::new(),
@@ -207,6 +211,8 @@ pub fn extract(input: &ExtractInput<'_>) -> ExtractedObservations {
         canonicals,
         hreflangs,
         viewport: None,
+        has_frames: false,
+        has_plugin_markup: false,
         text: String::new(),
     };
 
@@ -265,6 +271,10 @@ fn header_values(headers: &[ExtractHeader<'_>], name: &str) -> Vec<String> {
         .map(|header| header.value.trim().to_owned())
         .filter(|value| !value.is_empty())
         .collect()
+}
+
+fn charset_declared(content_type: &str, body: &[u8]) -> bool {
+    charset_from_content_type(content_type).is_some() || sniff_meta_charset(body).is_some()
 }
 
 fn charset_from_content_type(content_type: &str) -> Option<String> {
@@ -629,6 +639,27 @@ fn parse_html(
             }
             continue;
         }
+        if tag_opens(bytes, i, b"frameset") || tag_opens(bytes, i, b"frame") {
+            page.has_frames = true;
+            if let Some((end, _)) = read_tag(bytes, i) {
+                i = end;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+        if tag_opens(bytes, i, b"embed")
+            || tag_opens(bytes, i, b"object")
+            || tag_opens(bytes, i, b"applet")
+        {
+            page.has_plugin_markup = true;
+            if let Some((end, _)) = read_tag(bytes, i) {
+                i = end;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
         if tag_opens(bytes, i, b"img") {
             if let Some((end, attrs)) = read_tag(bytes, i) {
                 if let Some(src) = attr(&attrs, "src") {
@@ -674,6 +705,12 @@ fn parse_html(
 }
 
 fn apply_meta(page: &mut PageObservation, attrs: &str) {
+    if attr(attrs, "charset")
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+    {
+        page.charset_declared = true;
+    }
     let name = attr(attrs, "name")
         .or_else(|| attr(attrs, "http-equiv"))
         .unwrap_or_default()
@@ -690,6 +727,9 @@ fn apply_meta(page: &mut PageObservation, attrs: &str) {
         }
         "viewport" if page.viewport.is_none() => {
             page.viewport = Some(content.trim().to_owned());
+        }
+        "content-type" if charset_from_content_type(&content).is_some() => {
+            page.charset_declared = true;
         }
         _ => {}
     }
@@ -1093,7 +1133,7 @@ mod tests {
     }
 
     fn extract_html(html: &str) -> ExtractedObservations {
-        extract_html_status(200, "text/html; charset=utf-8", html.as_bytes(), false)
+        extract_html_status(200, "text/html", html.as_bytes(), false)
     }
 
     fn extract_html_status(
@@ -1120,7 +1160,14 @@ mod tests {
         assert!(missing.page.titles.is_empty());
         assert!(missing.page.descriptions.is_empty());
         assert!(missing.page.canonicals.is_empty());
+        assert!(!missing.page.charset_declared);
+        assert!(!missing.page.has_frames);
+        assert!(!missing.page.has_plugin_markup);
         assert!(missing.page.is_complete());
+
+        let empty_title = extract_html("<html><head><title></title></head><body></body></html>");
+        assert_eq!(empty_title.page.titles, [""]);
+        assert!(!empty_title.page.titles.is_empty());
 
         let multiple = extract_html(
             r#"<!DOCTYPE html>
@@ -1386,6 +1433,29 @@ mod tests {
     }
 
     #[test]
+    fn charset_frames_and_plugins_are_observed() {
+        let meta =
+            extract_html("<html><head><meta charset=\"utf-8\"><title>A</title></head></html>");
+        assert!(meta.page.charset_declared);
+        let http_equiv = extract_html(
+            "<html><head><meta http-equiv=\"Content-Type\" content=\"text/html; charset=utf-8\"></head></html>",
+        );
+        assert!(http_equiv.page.charset_declared);
+        let header = extract_html_status(200, "text/html; charset=utf-8", b"<html></html>", false);
+        assert!(header.page.charset_declared);
+
+        let frames = extract_html("<frameset><frame src=\"/a\"></frameset>");
+        assert!(frames.page.has_frames);
+        let iframe = extract_html("<html><body><iframe src=\"/a\"></iframe></body></html>");
+        assert!(!iframe.page.has_frames);
+
+        let plugin = extract_html("<html><body><embed src=\"flash.swf\"></body></html>");
+        assert!(plugin.page.has_plugin_markup);
+        let object = extract_html("<html><body><object data=\"a.swf\"></object></body></html>");
+        assert!(object.page.has_plugin_markup);
+    }
+
+    #[test]
     fn extraction_schema_is_independent_of_severity_and_ui() {
         let dump = format!("{:?}", extract_html("<html><title>A</title></html>"));
         let lower = dump.to_ascii_lowercase();
@@ -1393,6 +1463,6 @@ mod tests {
         assert!(!lower.contains("ratatui"));
         assert!(!lower.contains("warning"));
         assert!(!lower.contains("finding"));
-        assert_eq!(EXTRACTION_SCHEMA_VERSION, 1);
+        assert_eq!(EXTRACTION_SCHEMA_VERSION, 2);
     }
 }

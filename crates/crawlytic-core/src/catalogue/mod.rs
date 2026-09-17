@@ -739,8 +739,6 @@ mod tests {
             "ai.llms_txt_missing",
             "ai.llms_txt_formatting",
             "analytics.orphans_in_ga",
-            "meta.incompatible_plugin_content",
-            "meta.frames",
         ] {
             let rule = rule_by_id(id).unwrap_or_else(|| panic!("{id}"));
             assert_eq!(rule.status, RuleStatus::Deferred, "{id}");

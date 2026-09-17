@@ -160,6 +160,21 @@ impl AuditReport {
             .iter()
             .filter(move |finding| finding.id.rule_id == rule_id)
     }
+
+    /// Observation identities attached to a rule's findings. Duplicate-group
+    /// findings are compared by this URL set, not by the historical totals.
+    pub fn affected_identities(&self, rule_id: &str) -> Vec<&str> {
+        let mut seen = std::collections::BTreeSet::new();
+        for finding in &self.findings {
+            if finding.id.rule_id != rule_id {
+                continue;
+            }
+            for pointer in &finding.evidence {
+                seen.insert(pointer.observation_identity.as_str());
+            }
+        }
+        seen.into_iter().collect()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
