@@ -110,7 +110,9 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
     let text = if matches!(app.overlay, Overlay::Filter) {
         format!("Filter: {}_   Esc clear  Enter keep", app.filter)
     } else {
-        format!("1-5 screens  / filter  s start  x cancel  r resume  ? help  q quit{filter}")
+        format!(
+            "1-5 screens  / filter  s start  x cancel  r resume  o export  ? help  q quit{filter}"
+        )
     };
     frame.render_widget(Paragraph::new(text), area);
 }

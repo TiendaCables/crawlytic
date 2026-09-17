@@ -120,6 +120,7 @@ pub enum Action {
     SaveProfile,
     ApplyAuth,
     Probe,
+    Export,
 }
 
 #[derive(Debug, Clone)]
@@ -163,6 +164,7 @@ pub struct App {
     pub message: String,
     pub should_quit: bool,
     pub last_run_id: Option<i64>,
+    pub last_report: Option<AuditReport>,
     pub diagnostics: Vec<String>,
 }
 
@@ -237,6 +239,7 @@ impl App {
             message: "Ready. No crawl has run. Press s to start, ? for help.".into(),
             should_quit: false,
             last_run_id: None,
+            last_report: None,
             diagnostics: Vec::new(),
         }
     }
@@ -314,6 +317,7 @@ impl App {
             Key::Char('x') => Action::Cancel,
             Key::Char('r') => Action::Resume,
             Key::Char('p') => Action::Probe,
+            Key::Char('o') => Action::Export,
             Key::Char('a') if self.screen == Screen::Auth => Action::ApplyAuth,
             Key::Char('w') if self.screen == Screen::Profiles => Action::SaveProfile,
             Key::Char('e') if self.screen == Screen::Profiles => {
@@ -709,6 +713,7 @@ impl App {
 
     pub fn set_report(&mut self, report: AuditReport) {
         self.investigation = investigation_from_report(&report);
+        self.last_report = Some(report);
         self.clamp_selection();
         if self.findings_cursor.is_none() {
             self.findings_cursor = self.visible_finding_cursors().first().copied();
@@ -841,6 +846,7 @@ pub fn help_text() -> &'static str {
      j k  move     Enter  select/edit     w  save profile     e  edit field\n\
      s / Ctrl-S  start crawl     x / Ctrl-X  cancel     r / Ctrl-R  resume\n\
      a  apply masked auth to the process environment\n\
+     o  export CSV+JSON of the evaluated run (no credentials)\n\
      Cancel, resume, filter, help and selection work while a crawl is running.\n\
      Credentials are masked in the UI and never written to profiles or SQLite."
 }
@@ -1095,5 +1101,28 @@ mod tests {
         assert_eq!(app.profile.user_agent, "Crawlytic/test");
         let toml = app.profile.to_toml().unwrap();
         assert!(!toml.to_ascii_lowercase().contains("sig1="));
+    }
+
+    #[test]
+    fn findings_export_key_writes_csv_and_json_action() {
+        let mut app = app();
+        loaded(&mut app);
+        app.screen = Screen::Findings;
+        assert_eq!(app.handle(Key::Char('o')), Action::Export);
+        let help = help_text();
+        assert!(help.contains("export"), "{help}");
+        let rendered = render_plain(&app, 100, 24);
+        assert!(
+            rendered.contains("o export") || help.contains("o  export"),
+            "{rendered}\n{help}"
+        );
+        assert_eq!(
+            app.last_report.as_ref().map(|report| report.run_id),
+            Some(1)
+        );
+        assert_eq!(
+            app.last_report.as_ref().map(|report| report.findings.len()),
+            Some(app.investigation.finding_count())
+        );
     }
 }

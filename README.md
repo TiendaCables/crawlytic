@@ -21,8 +21,8 @@ or SQLite.
 
 Keyboard: `1`–`5` or Tab cycle Profiles, Auth, Run, URL inventory and Findings; `/`
 filters; `j`/`k` move; `s` / Ctrl-S start a crawl; `x` / Ctrl-X cancel; `r` / Ctrl-R
-resume; `a` apply masked auth; `e`/`w` edit and write the selected profile; `?` help;
-`q`/Escape/Ctrl-C quit. Cancel, resume, filter, help and selection stay available while
+resume; `a` apply masked auth; `e`/`w` edit and write the selected profile; `o` export
+the evaluated run as CSV+JSON; `?` help; `q`/Escape/Ctrl-C quit. Cancel, resume, filter, help and selection stay available while
 a crawl is running. Network work runs off the UI thread. No requests occur automatically.
 The terminal is restored on errors, panic and exit. Signature, Signature-Input and
 Signature-Agent are attached only to the profile's HTTPS origin. Same-origin HTTPS
@@ -55,7 +55,7 @@ locations are recorded and never receive credentials.
 
 ## Boundaries
 
-- `crawlytic-core`: profile, URL identity/scope, robots policy, Web Bot Auth transport, bounded crawl, homepage/sitemap discovery, SQLite run persistence, versioned page/link/resource extraction, evidence-based rule execution and finding lifecycle, HTML metadata, link/URL-shape, canonical/indexability, crawl-depth/orphan and resource checkers, typed start/cancel/resume commands with coalesced progress events, and run listing for resume; no terminal dependency.
+- `crawlytic-core`: profile, URL identity/scope, robots policy, Web Bot Auth transport, bounded crawl, homepage/sitemap discovery, SQLite run persistence, versioned page/link/resource extraction, evidence-based rule execution and finding lifecycle, HTML metadata, link/URL-shape, canonical/indexability, crawl-depth/orphan and resource checkers, typed start/cancel/resume commands with coalesced progress events, run listing for resume, CSV/JSON audit export, and a read-only generic CSV baseline importer; no terminal dependency.
 - `crawlytic`: Ratatui rendering, key input, profile/auth screens, run/URL/finding investigation and background-task coordination.
 - Future interfaces can use the core without depending on Ratatui. The displayed user agent is the HTTP User-Agent string, not a browser viewport.
 
@@ -117,7 +117,15 @@ definite site-wide orphans. `max_clicks` defaults to 3 (inventory baseline, not 
 formula). Other inventory checkers are not shipped; unregistered catalogue rules stay
 `unsupported`. Current 14
 September 2026 findings are stored separately from the historical "new issues" column.
-No-count rows are not failures. Duplicate fetch identities are scheduled once. Every URL
+No-count rows are not failures. Evaluated runs export CSV and JSON with stable finding
+identities, severity, unit, URL, evidence, status and run coverage. Formula-leading cells
+are neutralized for spreadsheet import. Counts match the Findings screen. Credentials are
+refused. A generic CSV mapper reads `source_check` and `entity_url` (optional referrer,
+unit, severity, observed_at, source_report, current_count, historical_delta) and keeps
+unmapped columns. Aggregate rows stay distinct from affected-entity rows; current counts
+are not historical deltas. The Semrush XLSX adapter is blocked until a real workbook is
+supplied; sheet and column names are not assumed. Source files are never modified.
+Duplicate fetch identities are scheduled once. Every URL
 ends fetched, excluded, blocked, failed or pending with a reason. A cancelled run is not
 complete. Authentication failures do not continue unsigned. Sitemap-only URLs do not get
 click depth 0. A kill/restart resumes without refetching completed observations; in-flight
@@ -142,7 +150,7 @@ lists it as an ignored parameter. Path slash variants and query order stay disti
 ## Next milestones
 
 1. Remaining inventory checkers over stored observations (images, resources); then the broader Semrush catalogue.
-2. Cross-run history, scheduled headless runs and exports. A web UI can follow independently.
+2. Cross-run history and scheduled headless runs. A web UI can follow independently.
 
 Recorded TiendaCables settings: www.tiendacables.com; 20,000 page cap; 3,725-page
 historical observation (not an invariant); homepage-link discovery; JS off; crawl
@@ -164,7 +172,8 @@ Terminal smoke test on Arch Linux (interactive; `q` / Esc / Ctrl-C to quit).
 The TUI starts without sending requests. Press `s` only when you intend a live crawl.
 Deterministic TUI fixtures cover keyboard navigation, filtering during a running session,
 masked credentials, small terminals, event floods, grouped findings with evidence/inlinks,
-and incomplete/unsupported checks without placeholder scores.
+incomplete/unsupported checks without placeholder scores, and CSV/JSON export from the
+Findings screen.
 
 ```sh
 cargo run -p crawlytic
@@ -197,7 +206,10 @@ access limitation, content-type-based resources-as-page-links without Semrush pa
 >200 character baseline, quoted heuristic thresholds, and incomplete evidence when a
 target was not fetched. Crawl-depth fixtures cover diamond/cycle/disconnected shortest paths,
 canonical/asset/sitemap edges that never count as inbound, a reproducible homepage path in
-depth findings, and coverage-qualified sitemap orphan candidates. They do not contact the storefront.
+depth findings, and coverage-qualified sitemap orphan candidates. Export fixtures cover quotes, Unicode,
+formula injection, stable finding identities, coverage reconciliation, secret refusal, and
+read-only CSV import that separates aggregate counts from entity rows and historical deltas.
+The Semrush workbook adapter stays blocked without inspecting unsupplied XLSX bytes. They do not contact the storefront.
 
 A user-reported or local crawl is operator evidence only. It is not recorded in
 this repository, is not covered by the default `cargo test` run, and is not proof that
