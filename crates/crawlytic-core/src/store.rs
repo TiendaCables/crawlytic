@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use url::Url;
 
-pub const STORE_SCHEMA_VERSION: i64 = 3;
+pub const STORE_SCHEMA_VERSION: i64 = 4;
 const DEFAULT_BATCH_SIZE: usize = 32;
 
 const MIGRATION_1: &str = "
@@ -280,6 +280,12 @@ CREATE TABLE audit_evaluations (
     config_fingerprint TEXT NOT NULL,
     PRIMARY KEY (run_id, seq)
 );
+";
+
+const MIGRATION_4: &str = "
+ALTER TABLE page_observations ADD COLUMN charset_declared INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE page_observations ADD COLUMN has_frames INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE page_observations ADD COLUMN has_plugin_markup INTEGER NOT NULL DEFAULT 0;
 ";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -827,8 +833,8 @@ impl Store {
                     run_id, identity, schema_version, complete, truncated, challenge,
                     error_status, non_html, encoding_fallback, status, content_type,
                     duration_ms, raw_bytes, decoded_bytes, encoding, doctype, html_lang,
-                    viewport, text
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
+                    viewport, text, charset_declared, has_frames, has_plugin_markup
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
                  ON CONFLICT(run_id, identity) DO UPDATE SET
                     schema_version=excluded.schema_version,
                     complete=excluded.complete,
@@ -846,7 +852,10 @@ impl Store {
                     doctype=excluded.doctype,
                     html_lang=excluded.html_lang,
                     viewport=excluded.viewport,
-                    text=excluded.text",
+                    text=excluded.text,
+                    charset_declared=excluded.charset_declared,
+                    has_frames=excluded.has_frames,
+                    has_plugin_markup=excluded.has_plugin_markup",
                 params![
                     run_id,
                     identity,
@@ -867,6 +876,9 @@ impl Store {
                     page.html_lang,
                     page.viewport,
                     page.text,
+                    page.charset_declared as i64,
+                    page.has_frames as i64,
+                    page.has_plugin_markup as i64,
                 ],
             )?;
             insert_strings(conn, "observation_titles", run_id, identity, &page.titles)?;
@@ -1250,6 +1262,16 @@ fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
         tx.execute(
             "INSERT INTO schema_migrations(version, applied_at) VALUES (?1, ?2)",
             params![3, now_secs()],
+        )
+        .map_err(|err| StoreError::migration(err.to_string()))?;
+        current = 3;
+    }
+    if current < 4 {
+        tx.execute_batch(MIGRATION_4)
+            .map_err(|err| StoreError::migration(err.to_string()))?;
+        tx.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (?1, ?2)",
+            params![4, now_secs()],
         )
         .map_err(|err| StoreError::migration(err.to_string()))?;
     }
@@ -1659,7 +1681,8 @@ fn load_observations(
         .prepare(
             "SELECT identity, schema_version, complete, truncated, challenge, error_status,
                     non_html, encoding_fallback, status, content_type, duration_ms,
-                    raw_bytes, decoded_bytes, encoding, doctype, html_lang, viewport, text
+                    raw_bytes, decoded_bytes, encoding, doctype, html_lang, viewport, text,
+                    charset_declared, has_frames, has_plugin_markup
              FROM page_observations WHERE run_id = ?1 ORDER BY identity",
         )
         .map_err(map_write)?;
@@ -1684,6 +1707,9 @@ fn load_observations(
                 row.get::<_, Option<String>>(15)?,
                 row.get::<_, Option<String>>(16)?,
                 row.get::<_, String>(17)?,
+                row.get::<_, i64>(18)?,
+                row.get::<_, i64>(19)?,
+                row.get::<_, i64>(20)?,
             ))
         })
         .map_err(map_write)?;
@@ -1712,6 +1738,9 @@ fn load_observations(
             html_lang,
             viewport,
             text,
+            charset_declared,
+            has_frames,
+            has_plugin_markup,
         ) = page;
         let headings = load_headings(conn, run_id, &identity)?;
         let hreflangs = load_hreflangs(conn, run_id, &identity)?;
@@ -1733,6 +1762,7 @@ fn load_observations(
                 raw_bytes: raw_bytes as u64,
                 decoded_bytes: decoded_bytes as u64,
                 encoding,
+                charset_declared: charset_declared != 0,
                 doctype,
                 html_lang,
                 titles: load_string_list(conn, "observation_titles", run_id, &identity)?,
@@ -1753,6 +1783,8 @@ fn load_observations(
                 canonicals: load_string_list(conn, "observation_canonicals", run_id, &identity)?,
                 hreflangs,
                 viewport,
+                has_frames: has_frames != 0,
+                has_plugin_markup: has_plugin_markup != 0,
                 text,
             },
             links: load_link_observations(conn, run_id, &identity)?,
