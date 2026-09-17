@@ -12,7 +12,7 @@ use rustls::{
     SignatureScheme,
 };
 use std::io::Write;
-use std::net::TcpStream;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::{Arc, Mutex, Once};
 use std::time::Duration;
 use x509_parser::prelude::*;
@@ -25,6 +25,8 @@ pub const MIXED_CONTENT_STATIC_COVERAGE: &str = "static-html";
 pub const MIXED_CONTENT_DYNAMIC_COVERAGE: &str = "incomplete-without-rendering";
 /// Crawlytic warning window, not a Semrush formula.
 pub const DEFAULT_DAYS_BEFORE_EXPIRY: u32 = 14;
+/// Per-address TCP connect budget so a blackholed AAAA record cannot freeze a run.
+pub const TLS_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum HostProbeKind {
@@ -153,7 +155,7 @@ pub(crate) fn inspect_tls_with_roots(
         return inspection;
     };
     let addr = format!("{connect_host}:{port}");
-    let stream = match TcpStream::connect(addr.as_str()) {
+    let stream = match connect_tls_stream(connect_host, port) {
         Ok(stream) => stream,
         Err(err) => {
             inspection.error = Some(format!("Connection failed to {addr}: {err}"));
@@ -241,6 +243,28 @@ pub(crate) fn names_include_host(names: &[String], host: &str) -> bool {
         let label = label.strip_suffix('.').unwrap_or(label);
         !label.is_empty() && !label.contains('.')
     })
+}
+
+fn connect_tls_stream(host: &str, port: u16) -> std::io::Result<TcpStream> {
+    let mut last = None;
+    let mut resolved = false;
+    for addr in (host, port).to_socket_addrs()? {
+        resolved = true;
+        match TcpStream::connect_timeout(&addr, TLS_CONNECT_TIMEOUT) {
+            Ok(stream) => return Ok(stream),
+            Err(err) => last = Some(err),
+        }
+    }
+    Err(last.unwrap_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            if resolved {
+                format!("No usable address for {host}:{port}")
+            } else {
+                format!("DNS lookup failed for {host}:{port}")
+            },
+        )
+    }))
 }
 
 fn ensure_crypto_provider() {
@@ -531,5 +555,19 @@ mod tests {
         };
         assert!(!canonical_only.redirected_to_https());
         assert!(canonical_only.canonical_https());
+    }
+
+    #[test]
+    fn unreachable_address_does_not_block_indefinitely() {
+        let started = std::time::Instant::now();
+        let inspection = inspect_tls("192.0.2.1", 443);
+        assert!(
+            started.elapsed() < TLS_CONNECT_TIMEOUT + Duration::from_secs(3),
+            "connect took {:?}",
+            started.elapsed()
+        );
+        assert!(!inspection.inspected, "{inspection:?}");
+        assert!(inspection.error.is_some(), "{inspection:?}");
+        assert!(!inspection.credentials_attached);
     }
 }

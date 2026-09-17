@@ -746,7 +746,7 @@ impl Crawler {
         }
 
         if !stop_scheduling && !cancel.is_cancelled() {
-            run_https_probes(&transport, &profile, &shared).await;
+            run_https_probes(&transport, &profile, &shared, &cancel).await;
         }
 
         let cancelled = cancel.is_cancelled();
@@ -1477,18 +1477,30 @@ async fn run_https_probes(
     transport: &SignedTransport,
     profile: &Profile,
     shared: &tokio::sync::Mutex<RunState>,
+    cancel: &CancelHandle,
 ) {
     let start = profile.start_url.clone();
     let host = start.host_str().unwrap_or_default().to_owned();
     let port = start.port_or_known_default().unwrap_or(443);
-    let inspection = inspect_tls(&host, port);
-    persist_tls_inspection(shared, inspection).await;
+    if cancel.is_cancelled() {
+        return;
+    }
+    persist_tls_inspection(shared, inspect_tls_async(host.clone(), port).await).await;
+    if cancel.is_cancelled() {
+        return;
+    }
     if let Some((apex, www)) = apex_and_www(&host) {
         if www != host {
-            persist_tls_inspection(shared, inspect_tls(&www, 443)).await;
+            persist_tls_inspection(shared, inspect_tls_async(www.clone(), 443).await).await;
+            if cancel.is_cancelled() {
+                return;
+            }
         }
         if apex != host {
-            persist_tls_inspection(shared, inspect_tls(&apex, 443)).await;
+            persist_tls_inspection(shared, inspect_tls_async(apex.clone(), 443).await).await;
+            if cancel.is_cancelled() {
+                return;
+            }
         }
         let mut www_url = start.clone();
         www_url.set_host(Some(&www)).ok();
@@ -1500,33 +1512,65 @@ async fn run_https_probes(
         apex_url.set_path("/");
         apex_url.set_query(None);
         apex_url.set_fragment(None);
-        persist_host_probe(
-            shared,
-            transport
-                .probe_host(&www_url, HostProbeKind::HttpsWww)
-                .await,
-        )
-        .await;
-        persist_host_probe(
-            shared,
-            transport
-                .probe_host(&apex_url, HostProbeKind::HttpsApex)
-                .await,
-        )
-        .await;
+        if let Some(probe) =
+            probe_host_cancellable(transport, www_url, HostProbeKind::HttpsWww, cancel).await
+        {
+            persist_host_probe(shared, probe).await;
+        } else {
+            return;
+        }
+        if let Some(probe) =
+            probe_host_cancellable(transport, apex_url, HostProbeKind::HttpsApex, cancel).await
+        {
+            persist_host_probe(shared, probe).await;
+        } else {
+            return;
+        }
+    }
+    if cancel.is_cancelled() {
+        return;
     }
     let mut http = start.clone();
     let _ = http.set_scheme("http");
     http.set_path("/");
     http.set_query(None);
     http.set_fragment(None);
-    persist_host_probe(
-        shared,
-        transport
-            .probe_host(&http, HostProbeKind::HttpHomepage)
-            .await,
-    )
-    .await;
+    if let Some(probe) =
+        probe_host_cancellable(transport, http, HostProbeKind::HttpHomepage, cancel).await
+    {
+        persist_host_probe(shared, probe).await;
+    }
+}
+
+async fn inspect_tls_async(host: String, port: u16) -> TlsInspection {
+    let label = host.clone();
+    match tokio::task::spawn_blocking(move || inspect_tls(&host, port)).await {
+        Ok(inspection) => inspection,
+        Err(_) => TlsInspection {
+            host: label,
+            port,
+            inspected: false,
+            verified: false,
+            hostname_ok: false,
+            not_before_unix: None,
+            not_after_unix: None,
+            names: Vec::new(),
+            error: Some("TLS inspection task failed".into()),
+            credentials_attached: false,
+        },
+    }
+}
+
+async fn probe_host_cancellable(
+    transport: &SignedTransport,
+    url: Url,
+    kind: HostProbeKind,
+    cancel: &CancelHandle,
+) -> Option<HostProbe> {
+    tokio::select! {
+        _ = cancel.cancelled() => None,
+        probe = transport.probe_host(&url, kind) => Some(probe),
+    }
 }
 
 async fn persist_tls_inspection(shared: &tokio::sync::Mutex<RunState>, inspection: TlsInspection) {
