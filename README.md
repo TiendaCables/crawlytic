@@ -55,7 +55,7 @@ locations are recorded and never receive credentials.
 
 ## Boundaries
 
-- `crawlytic-core`: profile, URL identity/scope, robots policy, Web Bot Auth transport, bounded crawl, homepage/sitemap discovery, SQLite run persistence, versioned page/link/resource extraction, evidence-based rule execution and finding lifecycle, HTML metadata, link/URL-shape, canonical/indexability, crawl-depth/orphan, resource, hreflang/lang and duplicate-content checkers, typed start/cancel/resume commands with coalesced progress events, run listing for resume, CSV/JSON audit export, and a read-only generic CSV baseline importer; no terminal dependency.
+- `crawlytic-core`: profile, URL identity/scope, robots policy, Web Bot Auth transport, bounded crawl, homepage/sitemap discovery, SQLite run persistence, versioned page/link/resource extraction, evidence-based rule execution and finding lifecycle, HTML metadata, link/URL-shape, canonical/indexability, crawl-depth/orphan, resource, hreflang/lang, duplicate-content and structured-data checkers, typed start/cancel/resume commands with coalesced progress events, run listing for resume, CSV/JSON audit export, and a read-only generic CSV baseline importer; no terminal dependency.
 - `crawlytic`: Ratatui rendering, key input, profile/auth screens, run/URL/finding investigation and background-task coordination.
 - Future interfaces can use the core without depending on Ratatui. The displayed user agent is the HTTP User-Agent string, not a browser viewport.
 
@@ -76,10 +76,10 @@ homepage-link discovery and independent sitemap inventory (indexes, gzip, size/d
 bounds, cross-origin locations refused without forwarding credentials),
 SQLite persistence for runs, sanitized profile snapshots, URL states, fetch evidence,
 links, resource references, sitemap membership and idempotent findings. Versioned page,
-link and resource observations (schema v3) extracted from fetched bodies so later rules
+link and resource observations (schema v4) extracted from fetched bodies so later rules
 share evidence without refetching: titles, descriptions, headings, robots meta/headers,
 canonicals, hreflang/lang, viewport, doctype, encoding, declared charset, frames,
-legacy plugin markup, meta refresh, redirect hops, text (nav/header/footer/aside chrome omitted),
+legacy plugin markup, meta refresh, JSON-LD blocks, Microdata/RDFa type inventory, redirect hops, text (nav/header/footer/aside chrome omitted),
 anchors/rel (image-only anchors use img alt) and
 images/scripts/styles, plus status, timings, content type, raw versus decoded sizes and
 completeness. Truncated, challenge, error and non-HTML bodies cannot be marked complete.
@@ -129,8 +129,12 @@ bands so comparisons stay bounded at a 20k URL cap (`near_duplicate_max_hamming=
 Reports include group method, fingerprint/hamming evidence and canonical/indexability context.
 Product variants that keep distinct main copy are not grouped. Truncated, non-HTML, challenge, error
 and robots-blocked responses never enter normal groups. Thresholds are Crawlytic heuristics, not
-Semrush formulas; near-duplicate grouping is transitive and uncertain. Other inventory checkers are
-not shipped; unregistered catalogue rules stay `unsupported`. Current 14
+Semrush formulas; near-duplicate grouping is transitive and uncertain. Structured-data checkers parse
+JSON-LD only (validator v1: Product, Offer, BreadcrumbList, Organization). Syntax, vocabulary and
+search-feature findings stay separate and point at item type, path and field. Microdata and RDFa are
+inventoried and reported as uncovered rather than passed. Local validation does not determine Google
+rich-result eligibility or actual search appearance. Other inventory checkers are not shipped;
+unregistered catalogue rules stay `unsupported`. Current 14
 September 2026 findings are stored separately from the historical "new issues" column.
 No-count rows are not failures. Evaluated runs export CSV and JSON with stable finding
 identities, severity, unit, URL, evidence, status and run coverage. Formula-leading cells
@@ -149,7 +153,7 @@ Signature-Input values. Disk-full and migration failures are visible and leave t
 incomplete. Raw HTML retention is off by default and quota-bounded when enabled. An
 uncommitted writer batch (default 32 statements) can be lost on crash.
 
-Not implemented: remaining inventory checkers beyond the shipped HTML/link/indexability/navigation/resource/hreflang/duplicate-content set, cross-run finding history,
+Not implemented: remaining inventory checkers beyond the shipped HTML/link/indexability/navigation/resource/hreflang/duplicate-content/structured-data set, cross-run finding history,
 scheduling, a credential vault (masked process-environment setup only), mobile rendering or JS.
 The page cap (20,000) and historical 3,725-page observation are not catalogue size.
 Weekly Monday is recorded without a time, timezone, or scheduler.
@@ -224,7 +228,7 @@ canonical/asset/sitemap edges that never count as inbound, a reproducible homepa
 depth findings, and coverage-qualified sitemap orphan candidates. Hreflang fixtures cover multi-locale
 and `x-default` clusters, absent return links, inaccessible targets, invalid BCP 47 tags, source
 conflicts, `html lang` without hreflang on a single-language page, content-language heuristic
-confidence, and unsigned cross-host locale fetches that never attach credentials. Export fixtures cover quotes, Unicode,
+confidence, and unsigned cross-host locale fetches that never attach credentials. Structured-data fixtures cover JSON-LD arrays and `@graph`, multiple offers, malformed JSON, missing required properties, Microdata/RDFa inventory that does not pass, unsupported types, and recommendations that do not promise Google rich results or appearance. Export fixtures cover quotes, Unicode,
 formula injection, stable finding identities, coverage reconciliation, secret refusal, and
 read-only CSV import that separates aggregate counts from entity rows and historical deltas.
 The Semrush workbook adapter stays blocked without inspecting unsupplied XLSX bytes. They do not contact the storefront.

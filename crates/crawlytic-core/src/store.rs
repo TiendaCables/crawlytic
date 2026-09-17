@@ -13,6 +13,7 @@ use crate::crawl::{
 use crate::extract::{
     EmbeddedKind, ExtractedObservations, Heading, HostOwner, Hreflang, LinkObservation,
     ObservationFlags, PageObservation, RedirectHop, ResourceFetch, ResourceObservation,
+    StructuredBlock, StructuredFormat,
 };
 use crate::profile::Profile;
 use crate::robots::{RobotsFetchState, RobotsRunMetadata};
@@ -25,7 +26,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use url::Url;
 
-pub const STORE_SCHEMA_VERSION: i64 = 7;
+pub const STORE_SCHEMA_VERSION: i64 = 8;
 const DEFAULT_BATCH_SIZE: usize = 32;
 
 const MIGRATION_1: &str = "
@@ -338,6 +339,19 @@ CREATE TABLE resource_fetches (
     robots_known INTEGER NOT NULL,
     content_type TEXT NOT NULL,
     PRIMARY KEY (run_id, identity)
+);
+";
+
+const MIGRATION_8: &str = "
+CREATE TABLE observation_structured (
+    run_id INTEGER NOT NULL,
+    identity TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    format TEXT NOT NULL,
+    block_index INTEGER NOT NULL,
+    raw TEXT NOT NULL,
+    types TEXT NOT NULL,
+    PRIMARY KEY (run_id, identity, seq)
 );
 ";
 
@@ -987,6 +1001,10 @@ impl Store {
                 params![run_id, identity],
             )?;
             conn.execute(
+                "DELETE FROM observation_structured WHERE run_id = ?1 AND identity = ?2",
+                params![run_id, identity],
+            )?;
+            conn.execute(
                 "DELETE FROM link_observations WHERE run_id = ?1 AND source = ?2",
                 params![run_id, identity],
             )?;
@@ -1110,6 +1128,23 @@ impl Store {
                     "INSERT INTO observation_hreflangs(run_id, identity, seq, lang, href)
                      VALUES (?1, ?2, ?3, ?4, ?5)",
                     params![run_id, identity, seq as i64, item.lang, item.href],
+                )?;
+            }
+            for (seq, block) in page.structured.iter().enumerate() {
+                let types = serde_json::to_string(&block.types).unwrap_or_else(|_| "[]".into());
+                conn.execute(
+                    "INSERT INTO observation_structured(
+                        run_id, identity, seq, format, block_index, raw, types
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![
+                        run_id,
+                        identity,
+                        seq as i64,
+                        block.format.as_str(),
+                        block.index as i64,
+                        block.raw,
+                        types
+                    ],
                 )?;
             }
             let link_start: i64 = conn.query_row(
@@ -1495,6 +1530,16 @@ fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
         tx.execute(
             "INSERT INTO schema_migrations(version, applied_at) VALUES (?1, ?2)",
             params![7, now_secs()],
+        )
+        .map_err(|err| StoreError::migration(err.to_string()))?;
+        current = 7;
+    }
+    if current < 8 {
+        tx.execute_batch(MIGRATION_8)
+            .map_err(|err| StoreError::migration(err.to_string()))?;
+        tx.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (?1, ?2)",
+            params![8, now_secs()],
         )
         .map_err(|err| StoreError::migration(err.to_string()))?;
     }
@@ -2203,6 +2248,7 @@ fn load_observations(
                     run_id,
                     &identity,
                 )?,
+                structured: load_structured(conn, run_id, &identity)?,
                 text,
             },
             links: load_link_observations(conn, run_id, &identity)?,
@@ -2259,6 +2305,44 @@ fn load_hreflangs(
         items.push(Hreflang { lang, href });
     }
     Ok(items)
+}
+
+fn load_structured(
+    conn: &Connection,
+    run_id: i64,
+    identity: &str,
+) -> Result<Vec<StructuredBlock>, StoreError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT format, block_index, raw, types FROM observation_structured
+             WHERE run_id = ?1 AND identity = ?2 ORDER BY seq",
+        )
+        .map_err(map_write)?;
+    let rows = stmt
+        .query_map(params![run_id, identity], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(map_write)?;
+    let mut blocks = Vec::new();
+    for row in rows {
+        let (format, index, raw, types) = row.map_err(map_write)?;
+        let Some(format) = StructuredFormat::parse(&format) else {
+            continue;
+        };
+        let types: Vec<String> = serde_json::from_str(&types).unwrap_or_default();
+        blocks.push(StructuredBlock {
+            format,
+            index: index as u32,
+            raw,
+            types,
+        });
+    }
+    Ok(blocks)
 }
 
 fn load_redirects(
@@ -2907,9 +2991,11 @@ mod tests {
             headers: &headers,
             body: br#"<html><head><title>Hi</title>
                 <link rel="canonical" href="/es">
+                <script type="application/ld+json">{"@type":"Organization","name":"Tienda"}</script>
                 </head><body>
                 <a href="/next">Next</a>
                 <img src="https://cdn.example.com/a.png" alt="A">
+                <div itemscope itemtype="https://schema.org/Product"></div>
                 </body></html>"#,
             truncated: false,
             duration_ms: Some(9),

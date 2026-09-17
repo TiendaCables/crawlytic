@@ -83,6 +83,11 @@ const GOOGLE_HREFLANG: &str =
 const MIXED_CONTENT: &str = "https://developer.mozilla.org/en-US/docs/Web/Security/Mixed_content";
 const RFC_6797: &str = "https://www.rfc-editor.org/rfc/rfc6797";
 const SCHEMA_ORG: &str = "https://schema.org/docs/gs.html";
+const JSON_LD: &str = "https://www.w3.org/TR/json-ld11/";
+const GOOGLE_STRUCTURED: &str =
+    "https://developers.google.com/search/docs/appearance/structured-data/intro-structured-data";
+const MICRODATA: &str = "https://html.spec.whatwg.org/multipage/microdata.html";
+const RDFA_LITE: &str = "https://www.w3.org/TR/rdfa-lite/";
 const LLMS_TXT: &str = "https://llmstxt.org/";
 
 pub const RULES: &[Rule] = &[
@@ -927,15 +932,17 @@ pub const RULES: &[Rule] = &[
         Severity::Error,
         InventoryUnit::Item,
         Stage::StructuredData,
-        &["json_ld", "microdata"],
+        &["json_ld", "microdata", "rdfa"],
         "Pages with structured data blocks",
         thr(
             "schema_validity",
-            None,
-            true,
-            "Coverage and e-commerce types are owned by TC-467. Do not infer a private validator set.",
+            Some(
+                "json-ld Product/Offer/BreadcrumbList/Organization; microdata/rdfa inventory-only"
+            ),
+            false,
+            "Validator v1. JSON syntax, vocabulary and search-feature layers are separate findings. Local validation does not determine Google rich-result eligibility or appearance.",
         ),
-        &[SCHEMA_ORG],
+        &[SCHEMA_ORG, JSON_LD, GOOGLE_STRUCTURED, MICRODATA, RDFA_LITE],
         &["TC-467"],
         RuleStatus::Specified,
         count(0, InventoryUnit::Item),
