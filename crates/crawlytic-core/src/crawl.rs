@@ -13,6 +13,7 @@ use crate::discovery::{
     ParsedSitemap, decode_sitemap_body, extract_navigational_links, parse_sitemap_xml,
 };
 use crate::extract::{ExtractHeader, ExtractInput, ExtractedObservations, ResourceFetch, extract};
+use crate::https::{HostProbe, HostProbeKind, TlsInspection, apex_and_www, inspect_tls};
 use crate::profile::Profile;
 use crate::robots::{AllowReason, RobotsCache, RobotsFile, RobotsRunMetadata, UrlAccess};
 use crate::scope::{ClassifiedUrl, Coverage, CoverageLink, FetchIdentity, classify_href};
@@ -47,6 +48,7 @@ pub const REASON_SITEMAP_FILE_CAP: &str = "Sitemap file cap";
 pub(crate) trait CrawlObserver: Send + Sync {
     fn on_records(&self, records: &BTreeMap<String, UrlRecord>, latest: Option<&UrlRecord>);
     fn on_diagnostic(&self, persist: bool, message: &str);
+    fn on_activity(&self, activity: &str);
 }
 
 #[derive(Clone, Default)]
@@ -70,6 +72,12 @@ impl CrawlNotify {
     fn diagnostic(&self, persist: bool, message: &str) {
         if let Some(inner) = &self.inner {
             inner.on_diagnostic(persist, message);
+        }
+    }
+
+    fn activity(&self, activity: &str) {
+        if let Some(inner) = &self.inner {
+            inner.on_activity(activity);
         }
     }
 }
@@ -250,6 +258,8 @@ pub struct CrawlReport {
     pub links: Vec<CoverageLink>,
     pub observations: Vec<ExtractedObservations>,
     pub resource_fetches: Vec<ResourceFetch>,
+    pub tls_inspections: Vec<TlsInspection>,
+    pub host_probes: Vec<HostProbe>,
 }
 
 impl CrawlReport {
@@ -552,6 +562,8 @@ impl Crawler {
             resource_fetches: Vec::new(),
             hreflang_queue: VecDeque::new(),
             hreflang_seen: BTreeSet::new(),
+            tls_inspections: Vec::new(),
+            host_probes: Vec::new(),
             start_url: self.profile.start_url.clone(),
         }));
         let gate = Arc::new(tokio::sync::Mutex::new(None::<tokio::time::Instant>));
@@ -622,6 +634,13 @@ impl Crawler {
 
         let robots_cache = Arc::new(robots_cache);
         if !stop_scheduling && !cancel.is_cancelled() {
+            {
+                let state = shared.lock().await;
+                let remaining = state.resource_queue.len();
+                state.notify.activity(&format!(
+                    "Probing images/scripts/styles ({remaining} queued)"
+                ));
+            }
             loop {
                 if cancel.is_cancelled() {
                     stop_scheduling = true;
@@ -633,7 +652,17 @@ impl Crawler {
                     }
                 }
                 while !stop_scheduling && tasks.len() < concurrency {
-                    let Some(url) = shared.lock().await.resource_queue.pop_front() else {
+                    let url = {
+                        let mut state = shared.lock().await;
+                        let remaining = state.resource_queue.len();
+                        if remaining % 25 == 0 {
+                            state.notify.activity(&format!(
+                                "Probing images/scripts/styles ({remaining} queued)"
+                            ));
+                        }
+                        state.resource_queue.pop_front()
+                    };
+                    let Some(url) = url else {
                         break;
                     };
                     let shared = shared.clone();
@@ -684,6 +713,10 @@ impl Crawler {
                 for observation in &existing {
                     enqueue_cross_host_hreflang(&mut state, observation);
                 }
+                let remaining = state.hreflang_queue.len();
+                state.notify.activity(&format!(
+                    "Fetching cross-host hreflang targets ({remaining} queued)"
+                ));
             }
             loop {
                 if cancel.is_cancelled() {
@@ -740,6 +773,16 @@ impl Crawler {
             while tasks.join_next().await.is_some() {}
         }
 
+        if !stop_scheduling && !cancel.is_cancelled() {
+            shared
+                .lock()
+                .await
+                .notify
+                .activity("Inspecting TLS and HTTP/www host probes");
+            run_https_probes(&transport, &profile, &shared, &cancel).await;
+        }
+        shared.lock().await.notify.activity("");
+
         let cancelled = cancel.is_cancelled();
         let mut state = shared.lock().await;
         let auth_failed = state.auth_failed;
@@ -767,6 +810,8 @@ impl Crawler {
         self.observations = std::mem::take(&mut state.observations);
         let observations = self.observations.clone();
         let resource_fetches = std::mem::take(&mut state.resource_fetches);
+        let tls_inspections = std::mem::take(&mut state.tls_inspections);
+        let host_probes = std::mem::take(&mut state.host_probes);
         stamp_sitemap_provenance(&mut self.records, &sitemap);
         let persist_error = persist_error.or_else(|| {
             persist_checkpoint(
@@ -801,6 +846,8 @@ impl Crawler {
             persist_error,
         );
         crawl_report.resource_fetches = resource_fetches;
+        crawl_report.tls_inspections = tls_inspections;
+        crawl_report.host_probes = host_probes;
         crawl_report
     }
 }
@@ -819,6 +866,8 @@ struct RunState {
     resource_fetches: Vec<ResourceFetch>,
     hreflang_queue: VecDeque<Url>,
     hreflang_seen: BTreeSet<String>,
+    tls_inspections: Vec<TlsInspection>,
+    host_probes: Vec<HostProbe>,
     start_url: Url,
 }
 
@@ -1031,6 +1080,8 @@ fn report(
         links: links.to_vec(),
         observations,
         resource_fetches: Vec::new(),
+        tls_inspections: Vec::new(),
+        host_probes: Vec::new(),
     }
 }
 
@@ -1454,6 +1505,128 @@ async fn persist_locale_observation(
         note_persist_error(&mut state, err);
     }
     state.observations.push(observation);
+}
+
+async fn run_https_probes(
+    transport: &SignedTransport,
+    profile: &Profile,
+    shared: &tokio::sync::Mutex<RunState>,
+    cancel: &CancelHandle,
+) {
+    let start = profile.start_url.clone();
+    let host = start.host_str().unwrap_or_default().to_owned();
+    let port = start.port_or_known_default().unwrap_or(443);
+    if cancel.is_cancelled() {
+        return;
+    }
+    persist_tls_inspection(shared, inspect_tls_async(host.clone(), port).await).await;
+    if cancel.is_cancelled() {
+        return;
+    }
+    if let Some((apex, www)) = apex_and_www(&host) {
+        if www != host {
+            persist_tls_inspection(shared, inspect_tls_async(www.clone(), 443).await).await;
+            if cancel.is_cancelled() {
+                return;
+            }
+        }
+        if apex != host {
+            persist_tls_inspection(shared, inspect_tls_async(apex.clone(), 443).await).await;
+            if cancel.is_cancelled() {
+                return;
+            }
+        }
+        let mut www_url = start.clone();
+        www_url.set_host(Some(&www)).ok();
+        www_url.set_path("/");
+        www_url.set_query(None);
+        www_url.set_fragment(None);
+        let mut apex_url = start.clone();
+        apex_url.set_host(Some(&apex)).ok();
+        apex_url.set_path("/");
+        apex_url.set_query(None);
+        apex_url.set_fragment(None);
+        if let Some(probe) =
+            probe_host_cancellable(transport, www_url, HostProbeKind::HttpsWww, cancel).await
+        {
+            persist_host_probe(shared, probe).await;
+        } else {
+            return;
+        }
+        if let Some(probe) =
+            probe_host_cancellable(transport, apex_url, HostProbeKind::HttpsApex, cancel).await
+        {
+            persist_host_probe(shared, probe).await;
+        } else {
+            return;
+        }
+    }
+    if cancel.is_cancelled() {
+        return;
+    }
+    let mut http = start.clone();
+    let _ = http.set_scheme("http");
+    http.set_path("/");
+    http.set_query(None);
+    http.set_fragment(None);
+    if let Some(probe) =
+        probe_host_cancellable(transport, http, HostProbeKind::HttpHomepage, cancel).await
+    {
+        persist_host_probe(shared, probe).await;
+    }
+}
+
+async fn inspect_tls_async(host: String, port: u16) -> TlsInspection {
+    let label = host.clone();
+    match tokio::task::spawn_blocking(move || inspect_tls(&host, port)).await {
+        Ok(inspection) => inspection,
+        Err(_) => TlsInspection {
+            host: label,
+            port,
+            inspected: false,
+            verified: false,
+            hostname_ok: false,
+            not_before_unix: None,
+            not_after_unix: None,
+            names: Vec::new(),
+            error: Some("TLS inspection task failed".into()),
+            credentials_attached: false,
+        },
+    }
+}
+
+async fn probe_host_cancellable(
+    transport: &SignedTransport,
+    url: Url,
+    kind: HostProbeKind,
+    cancel: &CancelHandle,
+) -> Option<HostProbe> {
+    tokio::select! {
+        _ = cancel.cancelled() => None,
+        probe = transport.probe_host(&url, kind) => Some(probe),
+    }
+}
+
+async fn persist_tls_inspection(shared: &tokio::sync::Mutex<RunState>, inspection: TlsInspection) {
+    let mut state = shared.lock().await;
+    if let Some(session) = state.persist.clone()
+        && let Err(err) = session
+            .store
+            .put_tls_inspection(session.run_id, &inspection)
+    {
+        note_persist_error(&mut state, err);
+    }
+    state.tls_inspections.push(inspection);
+}
+
+async fn persist_host_probe(shared: &tokio::sync::Mutex<RunState>, probe: HostProbe) {
+    let mut state = shared.lock().await;
+    if let Some(session) = state.persist.clone()
+        && let Err(err) = session.store.put_host_probe(session.run_id, &probe)
+    {
+        note_persist_error(&mut state, err);
+    }
+    state.host_probes.push(probe);
 }
 
 async fn persist_resource_fetch(shared: &tokio::sync::Mutex<RunState>, fetch: ResourceFetch) {

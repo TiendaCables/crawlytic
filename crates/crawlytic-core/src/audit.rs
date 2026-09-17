@@ -9,6 +9,7 @@ use crate::catalogue::{
 };
 use crate::crawl::{SitemapInventory, UrlRecord};
 use crate::extract::{ExtractedObservations, ResourceFetch};
+use crate::https::{HostProbe, TlsInspection};
 use crate::robots::RobotsRunMetadata;
 use crate::store::{Store, StoreError};
 use std::collections::BTreeMap;
@@ -79,6 +80,9 @@ pub struct EvidenceBundle<'a> {
     pub sitemap_done: bool,
     pub robots: Option<&'a RobotsRunMetadata>,
     pub resource_fetches: &'a [ResourceFetch],
+    pub tls_inspections: &'a [TlsInspection],
+    pub host_probes: &'a [HostProbe],
+    pub start_url: Option<&'a url::Url>,
 }
 
 /// Stable identity: rule id plus affected entity. Config changes update the
@@ -378,6 +382,9 @@ pub fn evaluate_stored(
         sitemap_done: run.sitemap_done,
         robots: run.robots.as_ref(),
         resource_fetches: &run.resource_fetches,
+        tls_inspections: &run.tls_inspections,
+        host_probes: &run.host_probes,
+        start_url: Some(&run.profile.start_url),
     };
     let report = evaluate(run_id, &evidence, config, registry, &suppressions);
     store.save_audit_report(&report)?;
@@ -662,6 +669,9 @@ mod tests {
                 sitemap_done: false,
                 robots: None,
                 resource_fetches: &[],
+                tls_inspections: &[],
+                host_probes: &[],
+                start_url: None,
             },
             config,
             registry,

@@ -597,6 +597,9 @@ mod tests {
             sitemap_done,
             robots: None,
             resource_fetches: &[],
+            tls_inspections: &[],
+            host_probes: &[],
+            start_url: None,
         }
     }
 

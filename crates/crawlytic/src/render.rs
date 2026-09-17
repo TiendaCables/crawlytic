@@ -2,7 +2,7 @@ use crate::app::{
     App, AuthField, FindingsCursor, Overlay, ProfileField, Screen, help_text, url_line,
 };
 use crate::model::{AuthPresence, inlinks_for, looks_like_placeholder_score, mask_secret};
-use crawlytic_core::RuleState;
+use crawlytic_core::{RuleState, SessionStatus};
 use ratatui::backend::TestBackend;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -209,6 +209,13 @@ fn render_run(frame: &mut Frame, area: Rect, app: &App) {
     let counters = app.progress.counters;
     let mut lines = vec![
         Line::from(format!("Status: {:?}", app.progress.status)),
+        Line::from(
+            match (app.progress.status, app.progress.activity.as_str()) {
+                (SessionStatus::Running, "") => "Activity: crawling pages".to_owned(),
+                (_, "") => "Activity: —".to_owned(),
+                (_, activity) => format!("Activity: {activity}"),
+            },
+        ),
         Line::from(format!(
             "User-Agent: {} (HTTP User-Agent, not a viewport)",
             app.progress.displayed_user_agent.as_str()

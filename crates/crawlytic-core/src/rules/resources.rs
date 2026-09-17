@@ -542,6 +542,9 @@ mod tests {
                 sitemap_done: false,
                 robots: None,
                 resource_fetches: fetches,
+                tls_inspections: &[],
+                host_probes: &[],
+                start_url: None,
             },
             &AuditConfig::default(),
             &resource_audit_registry(),
@@ -793,6 +796,9 @@ mod tests {
             sitemap_done: false,
             robots: None,
             resource_fetches: &fetches,
+            tls_inspections: &[],
+            host_probes: &[],
+            start_url: None,
         });
         assert_eq!(limited.len(), 1);
         assert!(limited[0].fact.contains("HTTP 403"));
