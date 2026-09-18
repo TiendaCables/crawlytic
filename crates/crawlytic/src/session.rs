@@ -1,8 +1,8 @@
 use crate::app::{Action, App, AuthField};
 use crawlytic_core::{
     AuditConfig, AuditReport, CoverageLink, CrawlCommand, CrawlLimits, Engine, EngineConfig,
-    RunSummary, SessionStatus, Store, UrlRecord, WebBotAuth, audit_registry, evaluate_stored,
-    export_document, write_export,
+    RunComparison, RunSummary, SessionStatus, Store, UrlRecord, WebBotAuth, audit_registry,
+    evaluate_stored, export_document, write_export,
 };
 use std::path::Path;
 use std::sync::mpsc;
@@ -21,6 +21,7 @@ struct EvalBundle {
     links: Vec<CoverageLink>,
     report: AuditReport,
     runs: Vec<RunSummary>,
+    history: Option<RunComparison>,
 }
 
 struct LiveEngine {
@@ -160,11 +161,15 @@ impl Session {
                     .and_then(|report| {
                         let loaded = store.load_run(run_id)?;
                         let runs = store.list_runs()?;
+                        let history = previous_run_id(&runs, run_id)
+                            .map(|baseline| store.compare_runs(baseline, run_id))
+                            .transpose()?;
                         Ok(EvalBundle {
                             urls: loaded.urls,
                             links: loaded.links,
                             report,
                             runs,
+                            history,
                         })
                     })
                     .map_err(|err| err.to_string());
@@ -181,6 +186,7 @@ impl Session {
                 app.set_urls(bundle.urls, bundle.links);
                 app.set_report(bundle.report);
                 app.set_runs(bundle.runs);
+                app.set_history(bundle.history);
                 app.message = "Evaluation complete.".into();
                 self.eval_rx = None;
             }
@@ -264,6 +270,17 @@ fn resolve_secret(app: &App, field: AuthField) -> anyhow::Result<String> {
 
 fn set_env(key: &str, value: &str) {
     unsafe { std::env::set_var(key, value) };
+}
+
+fn previous_run_id(runs: &[RunSummary], current: i64) -> Option<i64> {
+    let start_url = runs
+        .iter()
+        .find(|run| run.id == current)
+        .map(|run| run.start_url.as_str());
+    runs.iter()
+        .filter(|run| run.id < current)
+        .find(|run| start_url.is_none_or(|url| run.start_url == url))
+        .map(|run| run.id)
 }
 
 pub fn poll_timeout() -> Duration {

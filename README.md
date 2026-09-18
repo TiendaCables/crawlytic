@@ -55,8 +55,8 @@ locations are recorded and never receive credentials.
 
 ## Boundaries
 
-- `crawlytic-core`: profile, URL identity/scope, robots policy, Web Bot Auth transport, bounded crawl, homepage/sitemap discovery, SQLite run persistence, versioned page/link/resource extraction, evidence-based rule execution and finding lifecycle, HTML metadata, link/URL-shape, canonical/indexability, crawl-depth/orphan, resource, hreflang/lang, duplicate-content, structured-data and HTTPS/certificate checkers, typed start/cancel/resume commands with coalesced progress events, run listing for resume, CSV/JSON audit export, a read-only generic CSV baseline importer, and scoped-audit validation against the Semrush snapshot; no terminal dependency.
-- `crawlytic`: Ratatui rendering, key input, profile/auth screens, run/URL/finding investigation, Semrush comparison screen and background-task coordination.
+- `crawlytic-core`: profile, URL identity/scope, robots policy, Web Bot Auth transport, bounded crawl, homepage/sitemap discovery, SQLite run persistence, versioned page/link/resource extraction, evidence-based rule execution and finding lifecycle, HTML metadata, link/URL-shape, canonical/indexability, crawl-depth/orphan, resource, hreflang/lang, duplicate-content, structured-data and HTTPS/certificate checkers, typed start/cancel/resume commands with coalesced progress events, run listing for resume, CSV/JSON audit export, a read-only generic CSV baseline importer, scoped-audit validation against the Semrush snapshot, and cross-run finding history; no terminal dependency.
+- `crawlytic`: Ratatui rendering, key input, profile/auth screens, run/URL/finding investigation, Semrush comparison screen, History screen and background-task coordination.
 - Future interfaces can use the core without depending on Ratatui. The displayed user agent is the HTTP User-Agent string, not a browser viewport.
 
 Implemented: versioned TOML profiles (own-bot and comparison), prefix vs subfolder
@@ -150,7 +150,12 @@ are neutralized for spreadsheet import. Counts match the Findings screen. Creden
 refused. A generic CSV mapper reads `source_check` and `entity_url` (optional referrer,
 unit, severity, observed_at, source_report, current_count, historical_delta) and keeps
 unmapped columns. Aggregate rows stay distinct from affected-entity rows; current counts
-are not historical deltas. The Semrush XLSX adapter is blocked until a real workbook is
+are not historical deltas. Compatible runs compare stable finding identities as new,
+persistent, resolved, suppressed, out-of-scope or not-rechecked. An incomplete later run
+never resolves unvisited findings. Exclusion and rule-version changes are listed on the
+comparison. Current totals use the later run's finding rows as denominator; historical
+deltas use rechecked baseline identities and are not the catalogue "new issues" column.
+Widespread issues group by shared resource or template evidence. The Semrush XLSX adapter is blocked until a real workbook is
 supplied; sheet and column names are not assumed. Source files are never modified.
 Scoped-audit validation accounts for every discovered URL against the 3,725-page snapshot
 without forcing equal totals across dates. The snapshot is a historical count, not a URL
@@ -170,7 +175,6 @@ incomplete. Raw HTML retention is off by default and quota-bounded when enabled.
 uncommitted writer batch (default 32 statements) can be lost on crash.
 
 Not implemented: remaining inventory checkers beyond the shipped HTML/link/indexability/navigation/resource/hreflang/duplicate-content/structured-data/HTTPS set, Semrush Site Audit replacement,
-cross-run finding history,
 scheduling, a credential vault (masked process-environment setup only), mobile rendering or JS.
 The page cap (20,000) and historical 3,725-page observation are not catalogue size.
 Weekly Monday is recorded without a time, timezone, or scheduler.
@@ -186,7 +190,7 @@ lists it as an ignored parameter. Path slash variants and query order stay disti
 ## Next milestones
 
 1. Remaining inventory checkers over stored observations; then the broader Semrush catalogue.
-2. Cross-run history and scheduled headless runs. A web UI can follow independently.
+2. Scheduled headless runs. A web UI can follow independently.
 
 Recorded TiendaCables settings: www.tiendacables.com; 20,000 page cap; 3,725-page
 historical observation (not an invariant); homepage-link discovery; JS off; crawl
@@ -209,7 +213,8 @@ The TUI starts without sending requests. Press `s` only when you intend a live c
 Deterministic TUI fixtures cover keyboard navigation, filtering during a running session,
 masked credentials, small terminals, event floods, grouped findings with evidence/inlinks,
 incomplete/unsupported checks without placeholder scores, CSV/JSON export from the
-Findings screen, and the Compare screen (3,725 snapshot, no forced totals, no replacement claim).
+Findings screen, the Compare screen (3,725 snapshot, no forced totals, no replacement claim),
+and the History screen (new/persistent/resolved; current totals are not historical deltas).
 
 ```sh
 cargo run -p crawlytic
@@ -230,7 +235,10 @@ without duplicate findings, in-flight retry, secret-free stored settings, writer
 optional HTML quotas, and visible disk-full/migration failures that leave partial runs
 incomplete. Rule-execution fixtures cover stable finding identities, incomplete/unsupported
 prerequisites that never pass, fact/recommendation/severity separation, stored-observation
-reruns without a recrawl, and auditable suppressions that keep evidence. Extraction fixtures cover missing/multiple tags, malformed HTML, non-HTML
+reruns without a recrawl, and auditable suppressions that keep evidence. Cross-run history
+fixtures cover incomplete later runs that never resolve unvisited findings, surfaced
+exclusion and rule-version changes, known fixture new/persistent/resolved classifications,
+live-store identity round-trips, and separately documented current totals versus historical deltas. Extraction fixtures cover missing/multiple tags, malformed HTML, non-HTML
 responses, encoding fallback, declared charset, frames versus iframe, plugin markup,
 link/resource host ownership, meta refresh, image-only accessible names, and truncated/challenge/error
 bodies that stay incomplete. HTML metadata fixtures cover missing versus empty titles

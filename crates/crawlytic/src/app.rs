@@ -4,8 +4,8 @@ use crate::model::{
 };
 use crawlytic_core::{
     AuditReport, CoverageLink, CrawlCounters, CrawlEvent, Diagnostic, FetchCompletion, Profile,
-    ProgressSnapshot, RunSummary, SessionStatus, UrlRecord, UrlState, ValidationInput,
-    ValidationReport, audit_registry, validate_scoped_audit,
+    ProgressSnapshot, RunComparison, RunSummary, SessionStatus, UrlRecord, UrlState,
+    ValidationInput, ValidationReport, audit_registry, validate_scoped_audit,
 };
 use std::path::{Path, PathBuf};
 
@@ -17,10 +17,11 @@ pub enum Screen {
     Urls,
     Findings,
     Compare,
+    History,
 }
 
 impl Screen {
-    pub fn all() -> [Screen; 6] {
+    pub fn all() -> [Screen; 7] {
         [
             Screen::Profiles,
             Screen::Auth,
@@ -28,6 +29,7 @@ impl Screen {
             Screen::Urls,
             Screen::Findings,
             Screen::Compare,
+            Screen::History,
         ]
     }
 
@@ -39,6 +41,7 @@ impl Screen {
             Screen::Urls => "4 URLs",
             Screen::Findings => "5 Findings",
             Screen::Compare => "6 Compare",
+            Screen::History => "7 History",
         }
     }
 
@@ -49,18 +52,20 @@ impl Screen {
             Screen::Run => Screen::Urls,
             Screen::Urls => Screen::Findings,
             Screen::Findings => Screen::Compare,
-            Screen::Compare => Screen::Profiles,
+            Screen::Compare => Screen::History,
+            Screen::History => Screen::Profiles,
         }
     }
 
     fn prev(self) -> Self {
         match self {
-            Screen::Profiles => Screen::Compare,
+            Screen::Profiles => Screen::History,
             Screen::Auth => Screen::Profiles,
             Screen::Run => Screen::Auth,
             Screen::Urls => Screen::Run,
             Screen::Findings => Screen::Urls,
             Screen::Compare => Screen::Findings,
+            Screen::History => Screen::Compare,
         }
     }
 }
@@ -171,6 +176,7 @@ pub struct App {
     pub should_quit: bool,
     pub last_run_id: Option<i64>,
     pub last_report: Option<AuditReport>,
+    pub history: Option<RunComparison>,
     pub validation: Option<ValidationReport>,
     pub diagnostics: Vec<String>,
 }
@@ -248,6 +254,7 @@ impl App {
             should_quit: false,
             last_run_id: None,
             last_report: None,
+            history: None,
             validation: None,
             diagnostics: Vec::new(),
         }
@@ -316,6 +323,10 @@ impl App {
             }
             Key::Char('6') => {
                 self.screen = Screen::Compare;
+                Action::None
+            }
+            Key::Char('7') => {
+                self.screen = Screen::History;
                 Action::None
             }
             Key::Tab => {
@@ -525,6 +536,7 @@ impl App {
             }
             Screen::Findings => self.move_findings(delta),
             Screen::Compare => {}
+            Screen::History => {}
         }
     }
 
@@ -742,6 +754,10 @@ impl App {
         );
     }
 
+    pub fn set_history(&mut self, history: Option<RunComparison>) {
+        self.history = history;
+    }
+
     fn refresh_validation(&mut self) {
         let Some(report) = self.last_report.as_ref() else {
             self.validation = None;
@@ -874,12 +890,13 @@ pub fn discover_profiles(dir: &Path) -> anyhow::Result<Vec<ProfileFile>> {
 
 pub fn help_text() -> &'static str {
     "Keyboard\n\
-     1-6 / Tab  screens     ?  help     /  filter     q Esc Ctrl-C  quit\n\
+     1-7 / Tab  screens     ?  help     /  filter     q Esc Ctrl-C  quit\n\
      j k  move     Enter  select/edit     w  save profile     e  edit field\n\
      s / Ctrl-S  start crawl     x / Ctrl-X  cancel     r / Ctrl-R  resume\n\
      a  apply masked auth to the process environment\n\
      o  export CSV+JSON of the evaluated run (no credentials)\n\
      6  Semrush comparison (URL coverage, remaining gaps, no replacement claim)\n\
+     7  run history (new/persistent/resolved; current totals are not historical deltas)\n\
      Cancel, resume, filter, help and selection work while a crawl is running.\n\
      Credentials are masked in the UI and never written to profiles or SQLite."
 }
@@ -890,8 +907,9 @@ mod tests {
     use crate::model::looks_like_placeholder_score;
     use crate::render::render_plain;
     use crawlytic_core::{
-        CATALOGUE_VERSION, CoverageLink, EvidencePointer, FetchIdentity, Finding, FindingId,
-        RULE_CONFIG_VERSION, RuleOutcome, RuleState, Severity, UrlState,
+        CATALOGUE_VERSION, CountSummary, CoverageLink, EvidencePointer, FetchIdentity, Finding,
+        FindingChange, FindingDelta, FindingId, RULE_CONFIG_VERSION, RuleOutcome, RuleState,
+        RunComparison, Severity, UrlState,
     };
     use url::Url;
 
@@ -992,6 +1010,8 @@ mod tests {
         assert!(app.selected_finding().is_some());
         app.handle(Key::Char('6'));
         assert_eq!(app.screen, Screen::Compare);
+        app.handle(Key::Char('7'));
+        assert_eq!(app.screen, Screen::History);
         app.handle(Key::Tab);
         assert_eq!(app.screen, Screen::Profiles);
         app.handle(Key::Char('q'));
@@ -1212,5 +1232,47 @@ mod tests {
             "{rendered}"
         );
         assert!(!rendered.contains("CRAWL_SIGNATURE"));
+    }
+
+    #[test]
+    fn history_screen_separates_current_totals_from_deltas() {
+        let mut app = app();
+        loaded(&mut app);
+        app.set_history(Some(RunComparison {
+            baseline_run_id: 1,
+            later_run_id: 2,
+            notes: Vec::new(),
+            deltas: vec![FindingDelta {
+                id: FindingId::new("meta.missing_title", "https://audit.example/untitled"),
+                change: FindingChange::Persistent,
+                severity: Severity::Error,
+                fact: "The page has no non-empty title element.".into(),
+                group_key: None,
+            }],
+            groups: Vec::new(),
+            counts: CountSummary {
+                current_total: 1,
+                current_denominator: 1,
+                baseline_findings: 1,
+                rechecked_baseline: 1,
+                new: 0,
+                persistent: 1,
+                resolved: 0,
+                suppressed: 0,
+                out_of_scope: 0,
+                not_rechecked: 0,
+            },
+        }));
+        assert_eq!(app.handle(Key::Char('7')), Action::None);
+        assert_eq!(app.screen, Screen::History);
+        let rendered = render_plain(&app, 100, 28);
+        assert!(rendered.contains("persistent"), "{rendered}");
+        assert!(rendered.contains("finding rows"), "{rendered}");
+        assert!(rendered.contains("not the catalogue"), "{rendered}");
+        assert!(rendered.contains("new issues"), "{rendered}");
+        assert!(!rendered.contains("78 new"), "{rendered}");
+        assert!(!rendered.contains("CRAWL_SIGNATURE"), "{rendered}");
+        let help = help_text();
+        assert!(help.contains("historical deltas"), "{help}");
     }
 }
