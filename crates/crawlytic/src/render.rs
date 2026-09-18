@@ -36,6 +36,7 @@ pub fn render(frame: &mut Frame, app: &App) {
             Screen::Run => render_run(frame, body, app),
             Screen::Urls => render_urls(frame, body, app),
             Screen::Findings => render_findings(frame, body, app),
+            Screen::Compare => render_compare(frame, body, app),
         }
     }
     if footer.height > 0 {
@@ -81,13 +82,7 @@ fn render_tabs(frame: &mut Frame, area: Rect, app: &App) {
     let labels: Vec<Span> = Screen::all()
         .into_iter()
         .map(|screen| {
-            let label = match screen {
-                Screen::Profiles => "1 Profiles",
-                Screen::Auth => "2 Auth",
-                Screen::Run => "3 Run",
-                Screen::Urls => "4 URLs",
-                Screen::Findings => "5 Findings",
-            };
+            let label = screen.label();
             if screen == app.screen {
                 Span::styled(
                     format!(" {label} "),
@@ -111,7 +106,7 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
         format!("Filter: {}_   Esc clear  Enter keep", app.filter)
     } else {
         format!(
-            "1-5 screens  / filter  s start  x cancel  r resume  o export  ? help  q quit{filter}"
+            "1-6 screens  / filter  s start  x cancel  r resume  o export  ? help  q quit{filter}"
         )
     };
     frame.render_widget(Paragraph::new(text), area);
@@ -536,6 +531,38 @@ fn operator_message(app: &App) -> &str {
     } else {
         app.message.as_str()
     }
+}
+
+fn render_compare(frame: &mut Frame, area: Rect, app: &App) {
+    let mut lines = Vec::new();
+    if let Some(validation) = &app.validation {
+        for line in validation.summary_lines() {
+            lines.push(Line::from(line));
+        }
+        lines.push(Line::from(format!(
+            "Accounted URLs: {} (snapshot is a count, not a URL set)",
+            validation
+                .accounts
+                .iter()
+                .filter(
+                    |account| account.disposition != crawlytic_core::UrlDisposition::BaselineOnly
+                )
+                .count()
+        )));
+    } else {
+        lines.push(Line::from(
+            "Evaluate a run to compare coverage against the 3,725-page Semrush snapshot.",
+        ));
+        lines.push(Line::from(
+            "Totals are not forced equal. Replacement is not claimed without affected-URL rows.",
+        ));
+    }
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(Block::bordered().title(" Semrush comparison ")),
+        area,
+    );
 }
 
 fn centered(area: Rect, width: u16, height: u16) -> Rect {

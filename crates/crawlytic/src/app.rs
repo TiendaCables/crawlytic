@@ -4,7 +4,8 @@ use crate::model::{
 };
 use crawlytic_core::{
     AuditReport, CoverageLink, CrawlCounters, CrawlEvent, Diagnostic, FetchCompletion, Profile,
-    ProgressSnapshot, RunSummary, SessionStatus, UrlRecord, UrlState,
+    ProgressSnapshot, RunSummary, SessionStatus, UrlRecord, UrlState, ValidationInput,
+    ValidationReport, audit_registry, validate_scoped_audit,
 };
 use std::path::{Path, PathBuf};
 
@@ -15,26 +16,29 @@ pub enum Screen {
     Run,
     Urls,
     Findings,
+    Compare,
 }
 
 impl Screen {
-    pub fn all() -> [Screen; 5] {
+    pub fn all() -> [Screen; 6] {
         [
             Screen::Profiles,
             Screen::Auth,
             Screen::Run,
             Screen::Urls,
             Screen::Findings,
+            Screen::Compare,
         ]
     }
 
-    fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Screen::Profiles => "1 Profiles",
             Screen::Auth => "2 Auth",
             Screen::Run => "3 Run",
             Screen::Urls => "4 URLs",
             Screen::Findings => "5 Findings",
+            Screen::Compare => "6 Compare",
         }
     }
 
@@ -44,17 +48,19 @@ impl Screen {
             Screen::Auth => Screen::Run,
             Screen::Run => Screen::Urls,
             Screen::Urls => Screen::Findings,
-            Screen::Findings => Screen::Profiles,
+            Screen::Findings => Screen::Compare,
+            Screen::Compare => Screen::Profiles,
         }
     }
 
     fn prev(self) -> Self {
         match self {
-            Screen::Profiles => Screen::Findings,
+            Screen::Profiles => Screen::Compare,
             Screen::Auth => Screen::Profiles,
             Screen::Run => Screen::Auth,
             Screen::Urls => Screen::Run,
             Screen::Findings => Screen::Urls,
+            Screen::Compare => Screen::Findings,
         }
     }
 }
@@ -165,6 +171,7 @@ pub struct App {
     pub should_quit: bool,
     pub last_run_id: Option<i64>,
     pub last_report: Option<AuditReport>,
+    pub validation: Option<ValidationReport>,
     pub diagnostics: Vec<String>,
 }
 
@@ -241,6 +248,7 @@ impl App {
             should_quit: false,
             last_run_id: None,
             last_report: None,
+            validation: None,
             diagnostics: Vec::new(),
         }
     }
@@ -304,6 +312,10 @@ impl App {
             }
             Key::Char('5') => {
                 self.screen = Screen::Findings;
+                Action::None
+            }
+            Key::Char('6') => {
+                self.screen = Screen::Compare;
                 Action::None
             }
             Key::Tab => {
@@ -512,6 +524,7 @@ impl App {
                 }
             }
             Screen::Findings => self.move_findings(delta),
+            Screen::Compare => {}
         }
     }
 
@@ -700,6 +713,7 @@ impl App {
         self.urls = urls;
         self.links = links;
         self.clamp_selection();
+        self.refresh_validation();
     }
 
     pub fn set_runs(&mut self, runs: Vec<RunSummary>) {
@@ -719,12 +733,29 @@ impl App {
         if self.findings_cursor.is_none() {
             self.findings_cursor = self.visible_finding_cursors().first().copied();
         }
+        self.refresh_validation();
         self.message = format!(
             "Live findings {}. Incomplete {}. Unsupported {}. No placeholder scores.",
             self.investigation.finding_count(),
             self.investigation.incomplete.len(),
             self.investigation.unsupported.len()
         );
+    }
+
+    fn refresh_validation(&mut self) {
+        let Some(report) = self.last_report.as_ref() else {
+            self.validation = None;
+            return;
+        };
+        let registry = audit_registry();
+        self.validation = Some(validate_scoped_audit(&ValidationInput {
+            profile: &self.profile,
+            urls: &self.urls,
+            report,
+            registry: &registry,
+            baseline: None,
+            crawl_observed_at: None,
+        }));
     }
 
     pub fn auth_presence(&self, field: AuthField) -> AuthPresence {
@@ -843,11 +874,12 @@ pub fn discover_profiles(dir: &Path) -> anyhow::Result<Vec<ProfileFile>> {
 
 pub fn help_text() -> &'static str {
     "Keyboard\n\
-     1-5 / Tab  screens     ?  help     /  filter     q Esc Ctrl-C  quit\n\
+     1-6 / Tab  screens     ?  help     /  filter     q Esc Ctrl-C  quit\n\
      j k  move     Enter  select/edit     w  save profile     e  edit field\n\
      s / Ctrl-S  start crawl     x / Ctrl-X  cancel     r / Ctrl-R  resume\n\
      a  apply masked auth to the process environment\n\
      o  export CSV+JSON of the evaluated run (no credentials)\n\
+     6  Semrush comparison (URL coverage, remaining gaps, no replacement claim)\n\
      Cancel, resume, filter, help and selection work while a crawl is running.\n\
      Credentials are masked in the UI and never written to profiles or SQLite."
 }
@@ -958,6 +990,8 @@ mod tests {
         app.handle(Key::Char('5'));
         assert_eq!(app.screen, Screen::Findings);
         assert!(app.selected_finding().is_some());
+        app.handle(Key::Char('6'));
+        assert_eq!(app.screen, Screen::Compare);
         app.handle(Key::Tab);
         assert_eq!(app.screen, Screen::Profiles);
         app.handle(Key::Char('q'));
@@ -1154,5 +1188,29 @@ mod tests {
             app.last_report.as_ref().map(|report| report.findings.len()),
             Some(app.investigation.finding_count())
         );
+    }
+
+    #[test]
+    fn compare_screen_accounts_urls_without_claiming_replacement() {
+        let mut app = app();
+        loaded(&mut app);
+        app.handle(Key::Char('6'));
+        assert_eq!(app.screen, Screen::Compare);
+        let validation = app.validation.as_ref().expect("validation after report");
+        assert_eq!(validation.snapshot_pages, 3_725);
+        assert_ne!(validation.discovered, validation.snapshot_pages);
+        assert!(!validation.require_equal_totals);
+        assert!(validation.unexplained_high_impact.is_empty());
+        assert_eq!(
+            validation.replacement_claim,
+            crawlytic_core::ReplacementClaim::NotClaimed
+        );
+        let rendered = render_plain(&app, 100, 28);
+        assert!(rendered.contains("3725"), "{rendered}");
+        assert!(
+            rendered.contains("not_claimed") || rendered.contains("not claimed"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("CRAWL_SIGNATURE"));
     }
 }
