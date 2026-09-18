@@ -3540,6 +3540,57 @@ lists_complete = false
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn headless_audit_writes_same_export_schema_as_ratatui() {
+        use crate::headless::{HeadlessRequest, run_audit_with_transport};
+
+        let origin = TestOrigin::https();
+        origin.allow_robots();
+        origin.on("/", 200, "text/html", "<html><a href=\"/a\">a</a></html>");
+        origin.on("/a", 200, "text/html", "<html>a</html>");
+        let path = temp_db();
+        let store = Store::open(&path).unwrap().with_batch_size(1);
+        let mut lim = limits();
+        lim.concurrency = 1;
+        let export_dir = path.with_extension("export");
+        std::fs::create_dir_all(&export_dir).unwrap();
+        let transport = SignedTransport::new_with_client(client(), origin.url(), &auth());
+        let report = run_audit_with_transport(
+            HeadlessRequest {
+                store: store.clone(),
+                profile: profile_for(&origin),
+                limits: lim,
+                export_dir: export_dir.clone(),
+                lock_path: crate::schedule::default_lock_path(&path),
+                resume: false,
+            },
+            transport,
+        )
+        .await;
+        assert!(report.ok, "{}", report.message);
+        assert!(!report.email);
+        assert!(!report.overlap);
+        assert_eq!(report.exit_code, crate::headless::EXIT_OK);
+        let json_path = report.json_path.expect("json export");
+        let json = std::fs::read_to_string(&json_path).unwrap();
+        assert!(json.contains("\"findings\""), "{json}");
+        assert!(json.contains("\"coverage\""), "{json}");
+        assert!(json.contains("\"run_id\""), "{json}");
+        assert!(!json.to_ascii_lowercase().contains("sig1="), "{json}");
+        let csv = std::fs::read_to_string(report.csv_path.expect("csv export")).unwrap();
+        assert!(csv.contains("finding_id"), "{csv}");
+        let loaded = store.load_run(report.run_id.expect("run id")).unwrap();
+        let from_store = crate::exchange::export_document(
+            &store.load_audit_report(loaded.id).unwrap(),
+            &loaded.urls,
+        )
+        .unwrap();
+        assert_eq!(from_store.run_id, loaded.id);
+        assert_signed(&origin);
+        let _ = std::fs::remove_dir_all(&export_dir);
+        cleanup_db(&path);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn slow_consumer_cannot_unbounded_grow_and_cancel_resume_work() {
         use crate::engine::{CrawlCommand, SessionStatus};
 

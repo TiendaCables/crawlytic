@@ -7,11 +7,13 @@ mod discovery;
 mod engine;
 mod exchange;
 mod extract;
+mod headless;
 mod history;
 mod https;
 mod profile;
 mod robots;
 mod rules;
+mod schedule;
 mod scope;
 mod store;
 mod transport;
@@ -56,6 +58,10 @@ pub use extract::{
     Heading, HostOwner, Hreflang, LinkObservation, ObservationFlags, PageObservation, RedirectHop,
     ResourceFetch, ResourceObservation, StructuredBlock, StructuredFormat, extract,
 };
+pub use headless::{
+    EXIT_AUTH, EXIT_CRAWL, EXIT_EXPORT, EXIT_OK, EXIT_OVERLAP, EXIT_USAGE, HeadlessError,
+    HeadlessReport, HeadlessRequest, RunLock, persist_and_export, resolve_runtime_auth, run_audit,
+};
 pub use history::{
     CURRENT_TOTAL_SEMANTICS, CompatibilityKind, CompatibilityNote, CountSummary, FindingChange,
     FindingDelta, GroupKind, HISTORICAL_DELTA_SEMANTICS, IssueGroup, RunComparison, RunView,
@@ -88,6 +94,10 @@ pub use rules::{
     register_html_metadata, register_https_audit, register_indexability, register_link_audit,
     register_navigation, register_resource_audit, register_structured_data,
     resource_audit_registry, structured_data_registry,
+};
+pub use schedule::{
+    OVERLAP_POLICY, RESTART_POLICY, ScheduleError, ScheduleExec, ScheduleGuidance, SchedulePlan,
+    default_lock_path,
 };
 pub use scope::{
     ClassifiedUrl, Coverage, CoverageLink, CoverageUrl, FetchIdentity, SKIP_MALFORMED,

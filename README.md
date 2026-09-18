@@ -36,6 +36,22 @@ wrapped as `"https://shopify.com"`.
 
 Copy `profile.example.toml` to `profile.local.toml` and launch with
 `cargo run -p crawlytic -- profile.local.toml` to customize the own-bot profile.
+Headless (same core as Ratatui: Engine, `evaluate_stored`, CSV+JSON export):
+
+```sh
+cargo run -p crawlytic -- audit --profile profile.local.toml --json
+cargo run -p crawlytic -- schedule print --profile profile.local.toml
+```
+
+`audit` resolves Web Bot Auth at runtime, refuses overlapping processes via a
+store lock (exit 3, not queued), writes the same finding schema as the Findings
+screen, and never sends email. Stable exit codes: 0 ok, 1 usage, 2 auth/expiry,
+3 overlap, 4 crawl, 5 export. `schedule print` emits systemd oneshot+timer and a
+`MAILTO=""` crontab; it does not install units, enable timers, or create
+messages. Both `schedule_time` (HH:MM) and `schedule_timezone` (IANA) must be
+set in the profile before a schedule is considered enabled. Timer restart is
+`Restart=no` with `Persistent=true` for missed weekly fires; resume a crashed
+crawl with `audit --resume`.
 `profile.comparison.toml` records the captured Semrush SiteAuditBot user-agent and
 the same owner-supplied scope lists for comparison only; do not use it to impersonate
 Semrush. Wrap `.env` values in single quotes so embedded double quotes survive.
@@ -55,8 +71,8 @@ locations are recorded and never receive credentials.
 
 ## Boundaries
 
-- `crawlytic-core`: profile, URL identity/scope, robots policy, Web Bot Auth transport, bounded crawl, homepage/sitemap discovery, SQLite run persistence, versioned page/link/resource extraction, evidence-based rule execution and finding lifecycle, HTML metadata, link/URL-shape, canonical/indexability, crawl-depth/orphan, resource, hreflang/lang, duplicate-content, structured-data and HTTPS/certificate checkers, typed start/cancel/resume commands with coalesced progress events, run listing for resume, CSV/JSON audit export, a read-only generic CSV baseline importer, scoped-audit validation against the Semrush snapshot, and cross-run finding history; no terminal dependency.
-- `crawlytic`: Ratatui rendering, key input, profile/auth screens, run/URL/finding investigation, Semrush comparison screen, History screen and background-task coordination.
+- `crawlytic-core`: profile, URL identity/scope, robots policy, Web Bot Auth transport, bounded crawl, homepage/sitemap discovery, SQLite run persistence, versioned page/link/resource extraction, evidence-based rule execution and finding lifecycle, HTML metadata, link/URL-shape, canonical/indexability, crawl-depth/orphan, resource, hreflang/lang, duplicate-content, structured-data and HTTPS/certificate checkers, typed start/cancel/resume commands with coalesced progress events, run listing for resume, CSV/JSON audit export, a read-only generic CSV baseline importer, scoped-audit validation against the Semrush snapshot, cross-run finding history, headless audit orchestration with overlap locking and runtime secret resolution, and local weekly schedule plans (systemd/cron guidance; not an installed timer); no terminal dependency.
+- `crawlytic`: Ratatui rendering, key input, profile/auth screens, run/URL/finding investigation, Semrush comparison screen, History screen, background-task coordination, and noninteractive `audit` / `schedule print` commands.
 - Future interfaces can use the core without depending on Ratatui. The displayed user agent is the HTTP User-Agent string, not a browser viewport.
 
 Implemented: versioned TOML profiles (own-bot and comparison), prefix vs subfolder
@@ -175,9 +191,9 @@ incomplete. Raw HTML retention is off by default and quota-bounded when enabled.
 uncommitted writer batch (default 32 statements) can be lost on crash.
 
 Not implemented: remaining inventory checkers beyond the shipped HTML/link/indexability/navigation/resource/hreflang/duplicate-content/structured-data/HTTPS set, Semrush Site Audit replacement,
-scheduling, a credential vault (masked process-environment setup only), mobile rendering or JS.
+a credential vault (masked process-environment setup only), mobile rendering or JS, and email/completion notifications.
 The page cap (20,000) and historical 3,725-page observation are not catalogue size.
-Weekly Monday is recorded without a time, timezone, or scheduler.
+Weekly Monday intent stays unscheduled until the operator sets `schedule_time` and `schedule_timezone`; `schedule print` does not `systemctl enable` or write cron. Overlap is prevented, not queued. Known limitation: timezone names are checked against local zoneinfo when present; systemd/cron still resolve the name at fire time.
 A successful sample is not evidence that Shopify verified the signature, and the
 simple challenge heuristic cannot detect every block page. Default TiendaCables
 profiles keep robots and meta bypass off even with signed requests. Robots denial is
@@ -190,11 +206,11 @@ lists it as an ignored parameter. Path slash variants and query order stay disti
 ## Next milestones
 
 1. Remaining inventory checkers over stored observations; then the broader Semrush catalogue.
-2. Scheduled headless runs. A web UI can follow independently.
+2. A web UI can follow independently.
 
 Recorded TiendaCables settings: www.tiendacables.com; 20,000 page cap; 3,725-page
 historical observation (not an invariant); homepage-link discovery; JS off; crawl
-delay minimum (no numeric rate); weekly Monday intent; robots/meta bypass off;
+delay minimum (no numeric rate); weekly Monday intent (time/timezone operator-chosen before a timer is enabled); robots/meta bypass off;
 Web Bot Auth required; 27 ignored parameters and 21 excluded paths captured.
 
 ## Verification
@@ -215,6 +231,9 @@ masked credentials, small terminals, event floods, grouped findings with evidenc
 incomplete/unsupported checks without placeholder scores, CSV/JSON export from the
 Findings screen, the Compare screen (3,725 snapshot, no forced totals, no replacement claim),
 and the History screen (new/persistent/resolved; current totals are not historical deltas).
+Headless fixtures cover overlap locks, missing/expired runtime secrets without echoing values,
+schedule enablement that requires time and timezone, systemd/cron guidance with no email,
+and CSV/JSON export that matches Ratatui's `export_document` schema.
 
 ```sh
 cargo run -p crawlytic

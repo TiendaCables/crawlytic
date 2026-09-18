@@ -230,7 +230,6 @@ impl Engine {
         spawn_inner(config, None)
     }
 
-    #[cfg(test)]
     pub(crate) fn spawn_with_transport(config: EngineConfig, transport: SignedTransport) -> Self {
         spawn_inner(config, Some(transport))
     }
