@@ -1,6 +1,7 @@
 mod audit;
 mod auth;
 mod catalogue;
+mod compare;
 mod crawl;
 mod discovery;
 mod engine;
@@ -28,6 +29,12 @@ pub use catalogue::{
     HISTORICAL_BASELINE_DATE, InventoryUnit, NewIssuesExample, Rule, RuleState, RuleStatus,
     Severity, Stage, StateInput, checker_supported, current_findings, expected_fixture_state,
     new_issues_examples, resolve_state, rule_by_id, rules,
+};
+pub use compare::{
+    COMPARISON_USER_AGENT, MatrixClass, MatrixImpact, MatrixRow, OperationalPrerequisite,
+    RemainingGap, ReplacementClaim, SNAPSHOT_PAGE_COUNT, UrlAccount, UrlDisposition,
+    ValidationInput, ValidationReport, counts_by_disposition, high_impact_rules,
+    passing_regression_rule_ids, validate_scoped_audit,
 };
 pub use crawl::{
     CancelHandle, CrawlLimits, CrawlReport, Crawler, DEFAULT_MAX_RESPONSE_BYTES, SitemapFileRecord,

@@ -5,6 +5,7 @@ use crate::model::{
 use crawlytic_core::{
     AuditReport, CoverageLink, CrawlCounters, CrawlEvent, Diagnostic, FetchCompletion, Profile,
     ProgressSnapshot, RunComparison, RunSummary, SessionStatus, UrlRecord, UrlState,
+    ValidationInput, ValidationReport, audit_registry, validate_scoped_audit,
 };
 use std::path::{Path, PathBuf};
 
@@ -15,29 +16,32 @@ pub enum Screen {
     Run,
     Urls,
     Findings,
+    Compare,
     History,
 }
 
 impl Screen {
-    pub fn all() -> [Screen; 6] {
+    pub fn all() -> [Screen; 7] {
         [
             Screen::Profiles,
             Screen::Auth,
             Screen::Run,
             Screen::Urls,
             Screen::Findings,
+            Screen::Compare,
             Screen::History,
         ]
     }
 
-    fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Screen::Profiles => "1 Profiles",
             Screen::Auth => "2 Auth",
             Screen::Run => "3 Run",
             Screen::Urls => "4 URLs",
             Screen::Findings => "5 Findings",
-            Screen::History => "6 History",
+            Screen::Compare => "6 Compare",
+            Screen::History => "7 History",
         }
     }
 
@@ -47,7 +51,8 @@ impl Screen {
             Screen::Auth => Screen::Run,
             Screen::Run => Screen::Urls,
             Screen::Urls => Screen::Findings,
-            Screen::Findings => Screen::History,
+            Screen::Findings => Screen::Compare,
+            Screen::Compare => Screen::History,
             Screen::History => Screen::Profiles,
         }
     }
@@ -59,7 +64,8 @@ impl Screen {
             Screen::Run => Screen::Auth,
             Screen::Urls => Screen::Run,
             Screen::Findings => Screen::Urls,
-            Screen::History => Screen::Findings,
+            Screen::Compare => Screen::Findings,
+            Screen::History => Screen::Compare,
         }
     }
 }
@@ -171,6 +177,7 @@ pub struct App {
     pub last_run_id: Option<i64>,
     pub last_report: Option<AuditReport>,
     pub history: Option<RunComparison>,
+    pub validation: Option<ValidationReport>,
     pub diagnostics: Vec<String>,
 }
 
@@ -248,6 +255,7 @@ impl App {
             last_run_id: None,
             last_report: None,
             history: None,
+            validation: None,
             diagnostics: Vec::new(),
         }
     }
@@ -314,6 +322,10 @@ impl App {
                 Action::None
             }
             Key::Char('6') => {
+                self.screen = Screen::Compare;
+                Action::None
+            }
+            Key::Char('7') => {
                 self.screen = Screen::History;
                 Action::None
             }
@@ -523,6 +535,7 @@ impl App {
                 }
             }
             Screen::Findings => self.move_findings(delta),
+            Screen::Compare => {}
             Screen::History => {}
         }
     }
@@ -712,6 +725,7 @@ impl App {
         self.urls = urls;
         self.links = links;
         self.clamp_selection();
+        self.refresh_validation();
     }
 
     pub fn set_runs(&mut self, runs: Vec<RunSummary>) {
@@ -731,6 +745,7 @@ impl App {
         if self.findings_cursor.is_none() {
             self.findings_cursor = self.visible_finding_cursors().first().copied();
         }
+        self.refresh_validation();
         self.message = format!(
             "Live findings {}. Incomplete {}. Unsupported {}. No placeholder scores.",
             self.investigation.finding_count(),
@@ -741,6 +756,22 @@ impl App {
 
     pub fn set_history(&mut self, history: Option<RunComparison>) {
         self.history = history;
+    }
+
+    fn refresh_validation(&mut self) {
+        let Some(report) = self.last_report.as_ref() else {
+            self.validation = None;
+            return;
+        };
+        let registry = audit_registry();
+        self.validation = Some(validate_scoped_audit(&ValidationInput {
+            profile: &self.profile,
+            urls: &self.urls,
+            report,
+            registry: &registry,
+            baseline: None,
+            crawl_observed_at: None,
+        }));
     }
 
     pub fn auth_presence(&self, field: AuthField) -> AuthPresence {
@@ -859,12 +890,13 @@ pub fn discover_profiles(dir: &Path) -> anyhow::Result<Vec<ProfileFile>> {
 
 pub fn help_text() -> &'static str {
     "Keyboard\n\
-     1-6 / Tab  screens     ?  help     /  filter     q Esc Ctrl-C  quit\n\
+     1-7 / Tab  screens     ?  help     /  filter     q Esc Ctrl-C  quit\n\
      j k  move     Enter  select/edit     w  save profile     e  edit field\n\
      s / Ctrl-S  start crawl     x / Ctrl-X  cancel     r / Ctrl-R  resume\n\
      a  apply masked auth to the process environment\n\
      o  export CSV+JSON of the evaluated run (no credentials)\n\
-     6  run history (new/persistent/resolved; current totals are not historical deltas)\n\
+     6  Semrush comparison (URL coverage, remaining gaps, no replacement claim)\n\
+     7  run history (new/persistent/resolved; current totals are not historical deltas)\n\
      Cancel, resume, filter, help and selection work while a crawl is running.\n\
      Credentials are masked in the UI and never written to profiles or SQLite."
 }
@@ -977,6 +1009,8 @@ mod tests {
         assert_eq!(app.screen, Screen::Findings);
         assert!(app.selected_finding().is_some());
         app.handle(Key::Char('6'));
+        assert_eq!(app.screen, Screen::Compare);
+        app.handle(Key::Char('7'));
         assert_eq!(app.screen, Screen::History);
         app.handle(Key::Tab);
         assert_eq!(app.screen, Screen::Profiles);
@@ -1177,6 +1211,30 @@ mod tests {
     }
 
     #[test]
+    fn compare_screen_accounts_urls_without_claiming_replacement() {
+        let mut app = app();
+        loaded(&mut app);
+        app.handle(Key::Char('6'));
+        assert_eq!(app.screen, Screen::Compare);
+        let validation = app.validation.as_ref().expect("validation after report");
+        assert_eq!(validation.snapshot_pages, 3_725);
+        assert_ne!(validation.discovered, validation.snapshot_pages);
+        assert!(!validation.require_equal_totals);
+        assert!(validation.unexplained_high_impact.is_empty());
+        assert_eq!(
+            validation.replacement_claim,
+            crawlytic_core::ReplacementClaim::NotClaimed
+        );
+        let rendered = render_plain(&app, 100, 28);
+        assert!(rendered.contains("3725"), "{rendered}");
+        assert!(
+            rendered.contains("not_claimed") || rendered.contains("not claimed"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("CRAWL_SIGNATURE"));
+    }
+
+    #[test]
     fn history_screen_separates_current_totals_from_deltas() {
         let mut app = app();
         loaded(&mut app);
@@ -1205,7 +1263,7 @@ mod tests {
                 not_rechecked: 0,
             },
         }));
-        assert_eq!(app.handle(Key::Char('6')), Action::None);
+        assert_eq!(app.handle(Key::Char('7')), Action::None);
         assert_eq!(app.screen, Screen::History);
         let rendered = render_plain(&app, 100, 28);
         assert!(rendered.contains("persistent"), "{rendered}");

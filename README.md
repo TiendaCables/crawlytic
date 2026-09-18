@@ -19,7 +19,7 @@ credentials in shell history. The Auth screen can also accept masked values into
 process environment; they are never rendered unmasked, logged, or written to profiles
 or SQLite.
 
-Keyboard: `1`–`5` or Tab cycle Profiles, Auth, Run, URL inventory and Findings; `/`
+Keyboard: `1`–`6` or Tab cycle Profiles, Auth, Run, URL inventory, Findings and Compare; `/`
 filters; `j`/`k` move; `s` / Ctrl-S start a crawl; `x` / Ctrl-X cancel; `r` / Ctrl-R
 resume; `a` apply masked auth; `e`/`w` edit and write the selected profile; `o` export
 the evaluated run as CSV+JSON; `?` help; `q`/Escape/Ctrl-C quit. Cancel, resume, filter, help and selection stay available while
@@ -55,8 +55,8 @@ locations are recorded and never receive credentials.
 
 ## Boundaries
 
-- `crawlytic-core`: profile, URL identity/scope, robots policy, Web Bot Auth transport, bounded crawl, homepage/sitemap discovery, SQLite run persistence, versioned page/link/resource extraction, evidence-based rule execution and finding lifecycle, HTML metadata, link/URL-shape, canonical/indexability, crawl-depth/orphan, resource, hreflang/lang, duplicate-content, structured-data and HTTPS/certificate checkers, typed start/cancel/resume commands with coalesced progress events, run listing for resume, CSV/JSON audit export, a read-only generic CSV baseline importer, and cross-run finding history; no terminal dependency.
-- `crawlytic`: Ratatui rendering, key input, profile/auth screens, run/URL/finding investigation, History screen and background-task coordination.
+- `crawlytic-core`: profile, URL identity/scope, robots policy, Web Bot Auth transport, bounded crawl, homepage/sitemap discovery, SQLite run persistence, versioned page/link/resource extraction, evidence-based rule execution and finding lifecycle, HTML metadata, link/URL-shape, canonical/indexability, crawl-depth/orphan, resource, hreflang/lang, duplicate-content, structured-data and HTTPS/certificate checkers, typed start/cancel/resume commands with coalesced progress events, run listing for resume, CSV/JSON audit export, a read-only generic CSV baseline importer, scoped-audit validation against the Semrush snapshot, and cross-run finding history; no terminal dependency.
+- `crawlytic`: Ratatui rendering, key input, profile/auth screens, run/URL/finding investigation, Semrush comparison screen, History screen and background-task coordination.
 - Future interfaces can use the core without depending on Ratatui. The displayed user agent is the HTTP User-Agent string, not a browser viewport.
 
 Implemented: versioned TOML profiles (own-bot and comparison), prefix vs subfolder
@@ -157,6 +157,14 @@ comparison. Current totals use the later run's finding rows as denominator; hist
 deltas use rechecked baseline identities and are not the catalogue "new issues" column.
 Widespread issues group by shared resource or template evidence. The Semrush XLSX adapter is blocked until a real workbook is
 supplied; sheet and column names are not assumed. Source files are never modified.
+Scoped-audit validation accounts for every discovered URL against the 3,725-page snapshot
+without forcing equal totals across dates. The snapshot is a historical count, not a URL
+set. High-impact coverage is classified (shipped checker, engine URL-state, deferred owner
+issue, or aggregate-only). Unexplained fetched-URL misses are reported when affected-entity
+rows exist; they stay empty without those rows. Duplicate-description fixes re-evaluate stored
+observations without a recrawl. Remaining gaps (missing affected-URL export, own-bot vs
+SiteAuditBot user-agent, JS off, deferred catalogue, heuristic thresholds) and operational
+prerequisites are recorded. Replacement of Semrush Site Audit is not claimed.
 Duplicate fetch identities are scheduled once. Every URL
 ends fetched, excluded, blocked, failed or pending with a reason. A cancelled run is not
 complete. Authentication failures do not continue unsigned. Sitemap-only URLs do not get
@@ -166,7 +174,7 @@ Signature-Input values. Disk-full and migration failures are visible and leave t
 incomplete. Raw HTML retention is off by default and quota-bounded when enabled. An
 uncommitted writer batch (default 32 statements) can be lost on crash.
 
-Not implemented: remaining inventory checkers beyond the shipped HTML/link/indexability/navigation/resource/hreflang/duplicate-content/structured-data/HTTPS set,
+Not implemented: remaining inventory checkers beyond the shipped HTML/link/indexability/navigation/resource/hreflang/duplicate-content/structured-data/HTTPS set, Semrush Site Audit replacement,
 scheduling, a credential vault (masked process-environment setup only), mobile rendering or JS.
 The page cap (20,000) and historical 3,725-page observation are not catalogue size.
 Weekly Monday is recorded without a time, timezone, or scheduler.
@@ -205,7 +213,8 @@ The TUI starts without sending requests. Press `s` only when you intend a live c
 Deterministic TUI fixtures cover keyboard navigation, filtering during a running session,
 masked credentials, small terminals, event floods, grouped findings with evidence/inlinks,
 incomplete/unsupported checks without placeholder scores, CSV/JSON export from the
-Findings screen, and the History screen (new/persistent/resolved; current totals are not historical deltas).
+Findings screen, the Compare screen (3,725 snapshot, no forced totals, no replacement claim),
+and the History screen (new/persistent/resolved; current totals are not historical deltas).
 
 ```sh
 cargo run -p crawlytic
@@ -247,7 +256,7 @@ conflicts, `html lang` without hreflang on a single-language page, content-langu
 confidence, and unsigned cross-host locale fetches that never attach credentials. Structured-data fixtures cover JSON-LD arrays and `@graph`, multiple offers, malformed JSON, missing required properties, Microdata/RDFa inventory that does not pass, unsupported types, and recommendations that do not promise Google rich results or appearance. Export fixtures cover quotes, Unicode,
 formula injection, stable finding identities, coverage reconciliation, secret refusal, and
 read-only CSV import that separates aggregate counts from entity rows and historical deltas.
-The Semrush workbook adapter stays blocked without inspecting unsupplied XLSX bytes. They do not contact the storefront.
+The Semrush workbook adapter stays blocked without inspecting unsupplied XLSX bytes. Scoped-audit validation fixtures account for every discovered URL without forcing equality to 3,725, classify excluded baseline URLs, flag unexplained fetched misses only when entity rows exist, pin currently passing metadata checks, and re-evaluate a fixed duplicate-description pair from stored observations. They do not contact the storefront.
 
 A user-reported or local crawl is operator evidence only. It is not recorded in
 this repository, is not covered by the default `cargo test` run, and is not proof that
