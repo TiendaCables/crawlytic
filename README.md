@@ -1,44 +1,197 @@
 # Crawlytic
 
-A self-hosted technical SEO auditor with a Ratatui interface.
+Self-hosted technical SEO auditor. Crawl your own origin, persist evidence in
+SQLite, and inspect findings in a terminal UI or from a headless `audit` run.
 
-Product name: **Crawlytic**. License: [MIT](LICENSE). Repository:
-[`TiendaCables/crawlytic`](https://github.com/TiendaCables/crawlytic) (public GitHub org).
-Workspace crates stay unpublished (`publish = false`). This tree does not publish
-to a crate registry, ship a distribution package, or cancel any subscription.
+Built by [TiendaCables](https://github.com/TiendaCables). MIT licensed.
+Crates stay unpublished (`publish = false`); install from this repository.
+
+- [What it is](#what-it-is)
+- [Install](#install)
+- [Quick start](#quick-start)
+- [Commands](#commands)
+- [Terminal UI](#terminal-ui)
+- [Configuration](#configuration)
+- [Auth and crawl safety](#auth-and-crawl-safety)
+- [Workspace](#workspace)
+- [Status](#status)
+- [Develop](#develop)
+- [License](#license)
+
+## What it is
+
+Crawlytic is an operator-run auditor for a site you control. It is not a SaaS
+product, not a crates.io package, and not a Semrush Site Audit replacement.
+
+It will:
+
+- Discover URLs from the homepage, a sitemap, or both
+- Fetch pages over HTTPS with [Web Bot Auth](https://help.shopify.com/en/manual/promoting-marketing/seo/crawling-your-store) when the profile requires it
+- Store runs, URL states, and findings in SQLite
+- Evaluate a versioned rule catalogue against stored observations (no recrawl)
+- Export CSV + JSON, compare runs, and print systemd/cron guidance
+
+It will not:
+
+- Render JavaScript or emulate a browser
+- Send email or completion notifications
+- Queue overlapping crawls (a second process exits instead)
+- Attach credentials to HTTP, other origins, or unsigned fallbacks
+- Claim Google rich-result eligibility or search appearance
+
+The binary talks to the network only when you start a crawl. Opening the UI
+does not fetch anything.
 
 ## Install
 
-Supported install is **cargo from this repository**, not a distro package.
-Need a stable Rust toolchain 1.89+ (edition 2024). From a clone:
+Needs a stable Rust toolchain **1.89+** (edition 2024). From a clone:
 
 ```sh
 cargo install --path crates/crawlytic --locked
 ```
 
-From git (same binary; still not a registry publish):
+Or from git:
 
 ```sh
 cargo install --git https://github.com/TiendaCables/crawlytic.git --locked crawlytic
 ```
 
-Then `crawlytic` is on `PATH`. Copy `.env.example` to `.env` and
-`profile.example.toml` to `profile.local.toml` as below. Point the store with
-`--store` or `CRAWLYTIC_STORE` (default `./crawlytic.sqlite`).
+`crawlytic` is then on `PATH`. There is no distro package and no `cargo publish`.
 
-Restore an audit on a fresh machine after install:
+From a checkout, without installing:
+
+```sh
+cargo run -p crawlytic
+```
+
+## Quick start
+
+1. Copy the examples (never commit the copies):
+
+   ```sh
+   cp .env.example .env
+   cp profile.example.toml profile.local.toml
+   ```
+
+2. Put Shopify-generated Web Bot Auth values in `.env`. Wrap values in single
+   quotes so embedded double quotes survive:
+
+   ```sh
+   CRAWL_SIGNATURE='...'
+   CRAWL_SIGNATURE_INPUT='...'
+   CRAWL_SIGNATURE_AGENT='"https://shopify.com"'
+   ```
+
+   Quoted file values keep inner quotes after the outer quotes are stripped.
+   Exported environment variables override `.env`. `.env` is loaded at launch.
+
+3. Edit `profile.local.toml`: `start_url`, `max_pages`, `discovery_mode`,
+   exclusions, and ignored parameters. Secrets stay in the environment; the
+   profile only names the variables.
+
+4. Run the UI, or audit headlessly:
+
+   ```sh
+   crawlytic profile.local.toml
+   crawlytic audit --profile profile.local.toml --json
+   ```
+
+The SQLite store defaults to `./crawlytic.sqlite` (`--store` or
+`CRAWLYTIC_STORE`). Opening an older store applies schema migrations and keeps
+existing runs. Back up before upgrading the binary.
+
+## Commands
+
+| Command | What it does |
+|---|---|
+| `crawlytic [profile.toml]` | Interactive Ratatui UI |
+| `crawlytic audit --profile PATH [--json] [--resume]` | Crawl, evaluate, export CSV+JSON |
+| `crawlytic schedule print --profile PATH` | Print systemd oneshot+timer and a `MAILTO=""` crontab. Does not install units or enable timers. |
+| `crawlytic coverage` | Secret-free supported/deferred rule coverage JSON (also a CI artifact) |
+| `crawlytic backup --out PATH` | Consistent SQLite snapshot. Destination must not already exist. |
+| `crawlytic retention print` | Show raw-HTML retention settings |
+| `crawlytic retention set --max-html-bytes N [--retain-raw-html]` | Quota-bounded HTML retention (off by default) |
+| `crawlytic help` | CLI help |
+
+Audit options: `--store`, `--export-dir`, `--lock`, `--resume`. Overlap uses a
+store lock (exit 3), not a queue. Resume a crashed crawl with `audit --resume`.
+
+Exit codes: **0** ok, **1** usage, **2** auth/expiry, **3** overlap, **4** crawl,
+**5** export.
+
+`schedule print` is guidance only. Both `schedule_time` (HH:MM) and
+`schedule_timezone` (IANA) must be set on the profile before a schedule is
+considered enabled. Timer restart is `Restart=no` with `Persistent=true` for
+missed weekly fires.
+
+### Restore on a new machine
+
+Prefer `crawlytic backup` over copying a live WAL file (`*.sqlite-wal`):
 
 ```sh
 crawlytic backup --store crawlytic.sqlite --out crawlytic.sqlite.bak
 # copy crawlytic.sqlite.bak, profile.local.toml, and .env to the new host
-# (never commit those files). Destination must not already exist.
 cp crawlytic.sqlite.bak crawlytic.sqlite
 crawlytic audit --profile profile.local.toml --store crawlytic.sqlite --json
 ```
 
-Prefer `crawlytic backup` over copying a live WAL file (`*.sqlite-wal`). Opening
-an older store applies schema migrations and keeps existing runs and findings.
-Back up before upgrading the binary.
+## Terminal UI
+
+Screens: **1** Profiles, **2** Auth, **3** Run, **4** URL inventory, **5**
+Findings, **6** Compare, **7** History. Tab / Shift-Tab cycle them.
+
+| Key | Action |
+|---|---|
+| `1`–`7` / Tab | Screens |
+| `j` / `k` | Move |
+| `/` | Filter |
+| `s` / Ctrl-S | Start crawl |
+| `x` / Ctrl-X | Cancel |
+| `r` / Ctrl-R | Resume |
+| `a` | Apply masked auth to the process environment |
+| `e` / `w` | Edit / write the selected profile |
+| `o` | Export the evaluated run as CSV+JSON |
+| `?` | Help |
+| `q` / Esc / Ctrl-C | Quit |
+
+Cancel, resume, filter, help, and selection stay available while a crawl runs.
+Network work is off the UI thread. The terminal is restored on error, panic,
+and exit. Credentials are masked in the UI and never written to profiles or
+SQLite.
+
+## Configuration
+
+### Profile
+
+`profile.example.toml` is the own-bot profile (copy to `profile.local.toml`).
+`profile.comparison.toml` records a captured Semrush SiteAuditBot user-agent
+and the same owner-supplied scope lists for **comparison only**. Do not use it
+to impersonate Semrush.
+
+Useful fields:
+
+| Field | Notes |
+|---|---|
+| `start_url` | HTTPS origin to crawl |
+| `max_pages` | Crawl ceiling, not catalogue size |
+| `discovery_mode` | `homepage_internal_links`, `sitemap`, or `combined` |
+| `user_agent` | HTTP User-Agent string (not a viewport) |
+| `exclude_paths` | No trailing slash: string prefix (`/shoes` matches `/shoes-men`). Trailing slash: that folder only. |
+| `ignored_parameter_mode` | Default `skip` drops the whole URL if a listed parameter is present. `strip` is a separate explicit mode. |
+| `web_bot_auth_required` | No unsigned fallback when true |
+| `schedule_time` / `schedule_timezone` | Both required before `schedule print` is enabled |
+
+Sitemaps are independent inventory: they never create a navigation edge or
+assign click depth. Cross-origin sitemap locations are recorded and never
+receive credentials. Website mode starts at the homepage and follows raw HTML
+`<a href>` (JavaScript off).
+
+URL identity keeps distinct paths, query values, duplicate parameters, and
+pagination. Scheme, host, and default port are normalized. A canonical is
+never treated as proof two URLs are the same. Excluded and external targets
+stay in coverage and link relationships; they are not fetched.
+
+### Store and retention
 
 Raw HTML retention is off by default and quota-bounded when enabled:
 
@@ -47,240 +200,87 @@ crawlytic retention print --store crawlytic.sqlite
 crawlytic retention set --store crawlytic.sqlite --max-html-bytes 10485760 --retain-raw-html
 ```
 
-Secret-free supported/deferred rule coverage (also a CI artifact):
+Do not commit `.env`, `profile.local.toml`, SQLite files, or probe transcripts.
 
-```sh
-crawlytic coverage
-```
+## Auth and crawl safety
 
-## Run
+Web Bot Auth headers (`Signature`, `Signature-Input`, `Signature-Agent`) attach
+only to the profile's HTTPS origin. Same-origin HTTPS redirects keep the
+headers. Other origins and HTTP downgrades are refused and never receive
+credentials.
 
-From a checkout (no install required):
+Missing, malformed, or expired credentials fail **before** a request is sent.
+There is no unsigned fallback. `expires` in Signature-Input is local expiry
+metadata; replace values in `.env` or the process environment, never in
+profiles.
 
-```sh
-cargo run -p crawlytic
-```
+`CRAWL_SIGNATURE_AGENT` is sent as `Signature-Agent`. Shopify requires an
+sf-string, so a URI without quotes is wrapped as `"https://shopify.com"`.
 
-The interface starts without credentials. Copy `.env.example` to `.env` and fill in
-Shopify-generated `CRAWL_SIGNATURE`, `CRAWL_SIGNATURE_INPUT`, and `CRAWL_SIGNATURE_AGENT`.
-`.env` is loaded at launch. Quoted values keep embedded quotes after the outer quotes
-are stripped; exported environment variables override file values. Missing or invalid
-credentials produce errors that do not echo secret material. Avoid putting literal
-credentials in shell history. The Auth screen can also accept masked values into the
-process environment; they are never rendered unmasked, logged, or written to profiles
-or SQLite.
+The Auth screen can accept masked values into the process environment. They
+are never rendered unmasked, logged, or written to profiles or SQLite. Missing
+or invalid credentials produce errors that do not echo secret material. Avoid
+putting literal credentials in shell history.
 
-Keyboard: `1`–`6` or Tab cycle Profiles, Auth, Run, URL inventory, Findings and Compare; `/`
-filters; `j`/`k` move; `s` / Ctrl-S start a crawl; `x` / Ctrl-X cancel; `r` / Ctrl-R
-resume; `a` apply masked auth; `e`/`w` edit and write the selected profile; `o` export
-the evaluated run as CSV+JSON; `?` help; `q`/Escape/Ctrl-C quit. Cancel, resume, filter, help and selection stay available while
-a crawl is running. Network work runs off the UI thread. No requests occur automatically.
-The terminal is restored on errors, panic and exit. Signature, Signature-Input and
-Signature-Agent are attached only to the profile's HTTPS origin. Same-origin HTTPS
-redirects keep the headers; other origins and HTTP downgrades are refused and never
-receive credentials. Missing, malformed or expired credentials fail before a request is
-sent. There is no unsigned fallback. `CRAWL_SIGNATURE_AGENT` is sent as the
-`Signature-Agent` header. Shopify requires an sf-string, so a URI without quotes is
-wrapped as `"https://shopify.com"`.
-`expires` in Signature-Input is treated as local expiry metadata; replace values in
-`.env` or the process environment, never in profiles.
+A successful sample is not evidence that Shopify verified the signature. The
+simple challenge heuristic cannot detect every block page.
 
-Copy `profile.example.toml` to `profile.local.toml` and launch with
-`cargo run -p crawlytic -- profile.local.toml` to customize the own-bot profile.
-Headless (same core as Ratatui: Engine, `evaluate_stored`, CSV+JSON export):
+## Workspace
 
-```sh
-cargo run -p crawlytic -- audit --profile profile.local.toml --json
-cargo run -p crawlytic -- schedule print --profile profile.local.toml
-```
+| Crate | Role |
+|---|---|
+| `crawlytic-core` | Profile, scope, robots, transport, crawl, SQLite, extraction, rules, export, compare, headless audit, schedule plans. No terminal dependency. |
+| `crawlytic` | Ratatui UI, key input, and the `audit` / `schedule print` / `coverage` / `backup` / `retention` CLI |
 
-`audit` resolves Web Bot Auth at runtime, refuses overlapping processes via a
-store lock (exit 3, not queued), writes the same finding schema as the Findings
-screen, and never sends email. Stable exit codes: 0 ok, 1 usage, 2 auth/expiry,
-3 overlap, 4 crawl, 5 export. `schedule print` emits systemd oneshot+timer and a
-`MAILTO=""` crontab; it does not install units, enable timers, or create
-messages. Both `schedule_time` (HH:MM) and `schedule_timezone` (IANA) must be
-set in the profile before a schedule is considered enabled. Timer restart is
-`Restart=no` with `Persistent=true` for missed weekly fires; resume a crashed
-crawl with `audit --resume`.
-`profile.comparison.toml` records the captured Semrush SiteAuditBot user-agent and
-the same owner-supplied scope lists for comparison only; do not use it to impersonate
-Semrush. Wrap `.env` values in single quotes so embedded double quotes survive.
+Future interfaces can use core without depending on Ratatui.
 
-Captured lists are complete: 27 ignored parameter names and 21 excluded paths.
-URLs that carry a listed parameter are skipped entirely; `ignored_parameter_mode = "strip"` is a
-separate explicit behaviour. Path entries without a trailing slash are string
-prefixes (`/shoes` matches `/shoes-men`); a trailing slash is that folder only.
-Discovered hrefs keep the original link text, a fragment-stripped fetch identity, and an exact skip
-reason. Scheme, host and default port are normalized; distinct paths, query values, duplicate
-parameters and pagination are not collapsed. A canonical is never treated as proof two URLs are the
-same. Excluded and external targets remain in coverage and link relationships and are not fetched.
-Website mode starts at the homepage and follows raw HTML `<a href>` links (JavaScript off).
-Sitemaps are independent inventory: they never create a navigation edge or assign click depth.
-`discovery_mode` may be `homepage_internal_links`, `sitemap`, or `combined`. Cross-origin sitemap
-locations are recorded and never receive credentials.
+Shipped checkers cover HTML metadata, links/URL-shape, canonicals and
+indexability, crawl depth and orphans, resources, hreflang/lang, duplicate
+content, JSON-LD structured data, and HTTPS/certificates. Unregistered
+catalogue rules stay `unsupported`, never `passed`. Missing prerequisites
+resolve to `incomplete` or `unsupported`.
 
-## Boundaries
+Findings use a stable rule-plus-entity identity. Fact, recommendation, and
+severity stay separate. Scoped suppressions require a reason, are auditable,
+and do not delete evidence.
 
-- `crawlytic-core`: profile, URL identity/scope, robots policy, Web Bot Auth transport, bounded crawl, homepage/sitemap discovery, SQLite run persistence, versioned page/link/resource extraction, evidence-based rule execution and finding lifecycle, HTML metadata, link/URL-shape, canonical/indexability, crawl-depth/orphan, resource, hreflang/lang, duplicate-content, structured-data and HTTPS/certificate checkers, typed start/cancel/resume commands with coalesced progress events, run listing for resume, CSV/JSON audit export, a read-only generic CSV baseline importer, scoped-audit validation against the Semrush snapshot, cross-run finding history, headless audit orchestration with overlap locking and runtime secret resolution, and local weekly schedule plans (systemd/cron guidance; not an installed timer); no terminal dependency.
-- `crawlytic`: Ratatui rendering, key input, profile/auth screens, run/URL/finding investigation, Semrush comparison screen, History screen, background-task coordination, and noninteractive `audit` / `schedule print` commands.
-- Future interfaces can use the core without depending on Ratatui. The displayed user agent is the HTTP User-Agent string, not a browser viewport.
+## Status
 
-Implemented: versioned TOML profiles (own-bot and comparison), prefix vs subfolder
-exclusions, skip-vs-strip query policy, URL identity (relative links, HTML base href,
-fragment-stripped fetch keys, scheme/host/port normalization), coverage of skipped URLs
-without fetching them, Web Bot Auth transport with origin-locked
-headers, same-origin HTTPS redirects, one connection retry, Signature-Input expiry
-metadata, 401/403/429 diagnostics that separate observation from suspected cause,
-HTTP/TLS fixtures for header destinations, robots access policy as a separate layer
-(user-agent groups, wildcards, encodings, failed fetches, sitemap declarations),
-bounded signed sample of page (1 MiB HTML), robots and sitemap, responsive terminal status, versioned
-rule catalogue v1 (97 transcribed checks plus limited AMP remainder, fixture contract,
-six result states), bounded async crawl (frontier, worker pool, per-origin pace for
-`crawl_delay = minimum`, independent URL/queue/response-size caps, 429/503 Retry-After
-backoff with a retry budget, cancellation that classifies outstanding URLs),
-homepage-link discovery and independent sitemap inventory (indexes, gzip, size/depth/cycle
-bounds, cross-origin locations refused without forwarding credentials),
-SQLite persistence for runs, sanitized profile snapshots, URL states, fetch evidence,
-links, resource references, sitemap membership and idempotent findings. Versioned page,
-link and resource observations (schema v4) extracted from fetched bodies so later rules
-share evidence without refetching: titles, descriptions, headings, robots meta/headers,
-canonicals, hreflang/lang, viewport, doctype, encoding, declared charset, frames,
-legacy plugin markup, meta refresh, JSON-LD blocks, Microdata/RDFa type inventory, redirect hops, text (nav/header/footer/aside chrome omitted),
-anchors/rel (image-only anchors use img alt) and
-images/scripts/styles, plus status, timings, content type, raw versus decoded sizes and
-completeness. Truncated, challenge, error and non-HTML bodies cannot be marked complete.
-The extraction schema has no severity or UI fields. Typed crawl
-commands (start, cancel, resume) and coalesced progress events (run status, counters,
-fetch completion, diagnostics) so a headless client can drive a run; the discrete event
-queue is bounded and a slow consumer drops events instead of growing memory. Counters
-are unique URL records by persisted state and must reconcile with storage. Durable truth
-stays in SQLite; events are a live view. The displayed user agent is not a viewport. A versioned
-rule engine evaluates registered checkers against stored observations with no recrawl. Findings
-use a stable rule-plus-entity identity and keep fact, recommendation and severity separate.
-Missing prerequisites resolve to `incomplete` or `unsupported`, never `passed`. Scoped
-suppressions require a reason, are auditable, and do not delete evidence. HTML metadata checkers evaluate stored observations for titles, descriptions, headings,
-viewport, charset, doctype, oversized HTML, frames and plugin markup. Missing versus
-intentionally empty titles and descriptions stay distinct. Duplicate groups carry
-canonical and indexability context and are compared by affected URL set. Threshold
-recommendations quote `max_title_chars`, `min_title_chars` and `max_html_bytes`
-(Crawlytic heuristics, not Semrush formulas). The 14 September 2026 5-page duplicate-description
-and 73-page long-title totals remain historical catalogue metadata; they are not live URL lists.
-Link, anchor, redirect and URL-shape checkers evaluate stored observations: broken internal/external
-links, HTTP 4xx/5xx, malformed hrefs, meta refresh, redirect chains/loops, temporary/permanent
-redirects, on-page link count, query-parameter count, path underscores, page URLs longer than 200
-characters, long link URLs, internal/external nofollow, missing and generic anchors, and resources
-used as page links. Findings include the referring page, original anchor and target status.
-External HTTP 403 is an access limitation, not a confirmed broken target. Resource-as-page-link
-classification uses the fetched Content-Type, never the file extension alone; Semrush parity is not
-claimed. Heuristic defaults (`max_on_page_links=2500`, `max_query_params=4`, `max_link_chars=2048`,
-`max_redirects=1`, generic-anchor stop-list) are Crawlytic values, not Semrush formulas. The >200
-character page-URL threshold is the inventory baseline. Unfetched link targets stay `incomplete`,
-never `passed`. Crawl-depth checkers build a directed homepage `<a href>` graph: shortest-path
-click depth with a reproducible path, unique referring pages, one-inbound pages, and sitemap
-URLs with no observed internal inbound link. Canonicals, assets and sitemap membership never
-create a navigation edge. Incomplete crawls record one coverage-qualified sitemap orphan
-*candidate* summary rather than one row per unfetched sitemap URL. Out-of-scope sitemap
-entries are skipped. Duplicate listings share one identity. `max_clicks` defaults to 3 (inventory baseline, not a Semrush
-formula). Hreflang checkers evaluate stored observations for BCP 47/`x-default` syntax, per-source
-language conflicts, target status, missing return links, missing self-references, and
-canonical/noindex inconsistency. Failed relationships attach source and target evidence.
-Missing hreflang on a single-language page with `html lang` is not an error; both lang and
-hreflang absent is a warning. Content-language disagreement is a Crawlytic stopword heuristic
-with confidence (`min_language_hits`, `min_language_confidence`), not a parser or Semrush
-formula. Cross-host locale targets are fetched once over unsigned HTTPS (or a separately
-authorized transport) and do not consume `max_pages` or receive Web Bot Auth headers; same-host
-unfetched targets stay `incomplete`. Duplicate-content checkers hash chrome-stripped main text after
-trim-and-collapse-whitespace and recurring 5-gram boilerplate removal (`boilerplate_min_pages=3`).
-Exact groups use a 64-bit FNV-1a fingerprint. Near-duplicates use 64-bit simhash with 4×16-bit LSH
-bands so comparisons stay bounded at a 20k URL cap (`near_duplicate_max_hamming=3`, `min_main_tokens=12`).
-Reports include group method, fingerprint/hamming evidence and canonical/indexability context.
-Product variants that keep distinct main copy are not grouped. Truncated, non-HTML, challenge, error
-and robots-blocked responses never enter normal groups. Thresholds are Crawlytic heuristics, not
-Semrush formulas; near-duplicate grouping is transitive and uncertain. Structured-data checkers parse
-JSON-LD only (validator v1: Product, Offer, BreadcrumbList, Organization). Syntax, vocabulary and
-search-feature findings stay separate and point at item type, path and field. Microdata and RDFa are
-inventoried and reported as uncovered rather than passed. Local validation does not determine Google
-rich-result eligibility or actual search appearance. HTTPS checkers evaluate stored observations plus
-unsigned host probes: HTTP homepage redirects stay distinct from `rel=canonical` HTTPS hints; www/apex
-consolidation uses a configurable preferred host (default: start URL host); non-secure pages;
-HTTPS-to-HTTP links; static mixed content from HTML img/script/style (`static-html`; JavaScript-injected
-mixed content is `incomplete-without-rendering`). Certificates are inspected with rustls and Mozilla
-webpki roots; verification is never disabled in production. Expiry uses `days_before_expiry=14`
-(Crawlytic heuristic, not a Semrush formula). Host probes never attach Web Bot Auth headers to HTTP or
-alternate origins. Other inventory checkers are not shipped;
-unregistered catalogue rules stay `unsupported`. Current 14
-September 2026 findings are stored separately from the historical "new issues" column.
-No-count rows are not failures. Evaluated runs export CSV and JSON with stable finding
-identities, severity, unit, URL, evidence, status and run coverage. Formula-leading cells
-are neutralized for spreadsheet import. Counts match the Findings screen. Credentials are
-refused. A generic CSV mapper reads `source_check` and `entity_url` (optional referrer,
-unit, severity, observed_at, source_report, current_count, historical_delta) and keeps
-unmapped columns. Aggregate rows stay distinct from affected-entity rows; current counts
-are not historical deltas. Compatible runs compare stable finding identities as new,
-persistent, resolved, suppressed, out-of-scope or not-rechecked. An incomplete later run
-never resolves unvisited findings. Exclusion and rule-version changes are listed on the
-comparison. Current totals use the later run's finding rows as denominator; historical
-deltas use rechecked baseline identities and are not the catalogue "new issues" column.
-Widespread issues group by shared resource or template evidence. The Semrush XLSX adapter is blocked until a real workbook is
-supplied; sheet and column names are not assumed. Source files are never modified.
-Scoped-audit validation accounts for every discovered URL against the 3,725-page snapshot
-without forcing equal totals across dates. The snapshot is a historical count, not a URL
-set. High-impact coverage is classified (shipped checker, engine URL-state, deferred owner
-issue, or aggregate-only). Unexplained fetched-URL misses are reported when affected-entity
-rows exist; they stay empty without those rows. Duplicate-description fixes re-evaluate stored
-observations without a recrawl. Remaining gaps (missing affected-URL export, own-bot vs
-SiteAuditBot user-agent, JS off, deferred catalogue, heuristic thresholds) and operational
-prerequisites are recorded. Replacement of Semrush Site Audit is not claimed.
-Duplicate fetch identities are scheduled once. Every URL
-ends fetched, excluded, blocked, failed or pending with a reason. A cancelled run is not
-complete. Authentication failures do not continue unsigned. Sitemap-only URLs do not get
-click depth 0. A kill/restart resumes without refetching completed observations; in-flight
-URLs are retried. Stored settings keep environment references only and never Signature or
-Signature-Input values. Disk-full and migration failures are visible and leave the run
-incomplete. Raw HTML retention is off by default and quota-bounded when enabled. An
-uncommitted writer batch (default 32 statements) can be lost on crash.
+Implemented: versioned TOML profiles, origin-locked Web Bot Auth, bounded
+async crawl with cancel/resume, SQLite persistence, rule evaluation over
+stored observations, CSV/JSON export, run comparison and history, headless
+audit with overlap locking, local weekly schedule *plans*.
 
-Not implemented: remaining inventory checkers beyond the shipped HTML/link/indexability/navigation/resource/hreflang/duplicate-content/structured-data/HTTPS set, Semrush Site Audit replacement,
-a credential vault (masked process-environment setup only), mobile rendering or JS, and email/completion notifications.
-The page cap (20,000) and historical 3,725-page observation are not catalogue size.
-Weekly Monday intent stays unscheduled until the operator sets `schedule_time` and `schedule_timezone`; `schedule print` does not `systemctl enable` or write cron. Overlap is prevented, not queued. Known limitation: timezone names are checked against local zoneinfo when present; systemd/cron still resolve the name at fire time.
-A successful sample is not evidence that Shopify verified the signature, and the
-simple challenge heuristic cannot detect every block page. Default TiendaCables
-profiles keep robots and meta bypass off even with signed requests. Robots denial is
-blocked evidence, not a broken page. Meta noindex is a distinct block kind and is not
-evaluated in this slice. Crawl-delay is recorded and is not access policy. Missing or
-unreachable robots.txt allows crawling and is not treated as a denial.
-`page` is a distinct fetch identity and is skipped only because the TiendaCables profile
-lists it as an ignored parameter. Path slash variants and query order stay distinct.
+Not implemented: remaining inventory checkers, a credential vault, mobile or
+JS rendering, email, Semrush Site Audit replacement. The Semrush XLSX adapter
+stays blocked until a real workbook is supplied.
 
-## Next milestones
+Known limits:
 
-1. Remaining inventory checkers over stored observations; then the broader Semrush catalogue.
+- Default page cap is 20,000. Historical snapshot counts in example profiles
+  are observations, not invariants.
+- Heuristic thresholds (`max_title_chars`, `max_clicks`, near-duplicate
+  Hamming distance, certificate `days_before_expiry`, …) are Crawlytic values,
+  not Semrush formulas.
+- Robots denial is blocked evidence, not a broken page. Missing or unreachable
+  `robots.txt` allows crawling.
+- Default TiendaCables profiles keep robots and meta bypass off even with
+  signed requests.
+- Timezone names are checked against local zoneinfo when present; systemd/cron
+  still resolve the name at fire time.
+- An uncommitted writer batch (default 32 statements) can be lost on crash.
+
+Next:
+
+1. Remaining inventory checkers over stored observations, then the broader catalogue.
 2. A web UI can follow independently.
 
-Recorded TiendaCables settings: www.tiendacables.com; 20,000 page cap; 3,725-page
-historical observation (not an invariant); homepage-link discovery; JS off; crawl
-delay minimum (no numeric rate); weekly Monday intent (time/timezone operator-chosen before a timer is enabled); robots/meta bypass off;
-Web Bot Auth required; 27 ignored parameters and 21 excluded paths captured.
+`crawlytic coverage` is the live supported/deferred list.
 
-## Publication
+## Develop
 
-Do **not** `cargo publish` these crates from a personal crates.io account.
-`publish = false` is intentional for this first supported release. Install is
-`cargo install --git` / `--path` from the company GitHub org.
-
-If a later issue enables registry publication: log in to crates.io with a
-**TiendaCables** GitHub identity (or a dedicated company user), add the GitHub
-org team as crate owners, store the publish token in org CI secrets, and keep
-personal crates.io credentials off this repository. Transferring a crate that
-was first published under a personal username is possible and messy; skip that
-path. Publishing is not required to install or restore an audit.
-
-## Verification
-
-Automated (does not contact the storefront). GitHub Actions on `main` and pull
-requests runs the same commands and uploads `rule-coverage.json`:
+Automated checks do not contact the storefront. GitHub Actions on `main` and
+pull requests runs the same commands and uploads `rule-coverage.json`:
 
 ```sh
 cargo fmt --all -- --check
@@ -290,65 +290,28 @@ cargo test --workspace
 cargo run -p crawlytic -- coverage
 ```
 
-Terminal smoke test (interactive; `q` / Esc / Ctrl-C to quit).
-The TUI starts without sending requests. Press `s` only when you intend a live crawl.
-Deterministic TUI fixtures cover keyboard navigation, filtering during a running session,
-masked credentials, small terminals, event floods, grouped findings with evidence/inlinks,
-incomplete/unsupported checks without placeholder scores, CSV/JSON export from the
-Findings screen, the Compare screen (3,725 snapshot, no forced totals, no replacement claim),
-and the History screen (new/persistent/resolved; current totals are not historical deltas).
-Headless fixtures cover overlap locks, missing/expired runtime secrets without echoing values,
-schedule enablement that requires time and timezone, systemd/cron guidance with no email,
-and CSV/JSON export that matches Ratatui's `export_document` schema.
+`cargo test` includes HTTP/TLS, robots, crawl, engine, persistence, rules,
+extraction, export, and TUI fixtures. Press `s` in the UI only when you intend
+a live crawl.
+
+A user-reported or local crawl is operator evidence only. It is not recorded
+in this repository and is not proof that Shopify accepted the signature.
+
+Optional live probe (credentials already in the environment):
 
 ```sh
-cargo run -p crawlytic
+cargo test -p crawlytic-core live_tiendacables -- --ignored
 ```
 
-Controlled HTTP/TLS fixtures in `cargo test` assert which destination receives each
-Web Bot Auth header, including same-origin redirects, refused cross-origin and HTTP
-downgrades, retries, 401/403/429 diagnostics and secret redaction. Robots fixtures
-cover user-agent selection, conflicting rules, encodings, failed fetches, signed
-requests with bypass off, and an explicit owner-audit override retained in run
-metadata. Crawl fixtures cover duplicate identities, independent URL/queue/body caps,
-429/503 backoff, unsigned-fallback refusal, robots blocks, cancellation, homepage-link
-discovery, sitemap inventory (including gzip, cycles, oversized/parse/inaccessible files)
-and refused cross-origin sitemap locations. Engine fixtures cover a headless start/observe
-client, cancel/resume commands, counter reconciliation with persisted URL states, and a
-bounded event queue that drops when the consumer lags. Persistence fixtures cover kill/restart resume
-without duplicate findings, in-flight retry, secret-free stored settings, writer batching,
-optional HTML quotas, and visible disk-full/migration failures that leave partial runs
-incomplete. Rule-execution fixtures cover stable finding identities, incomplete/unsupported
-prerequisites that never pass, fact/recommendation/severity separation, stored-observation
-reruns without a recrawl, and auditable suppressions that keep evidence. Cross-run history
-fixtures cover incomplete later runs that never resolve unvisited findings, surfaced
-exclusion and rule-version changes, known fixture new/persistent/resolved classifications,
-live-store identity round-trips, and separately documented current totals versus historical deltas. Extraction fixtures cover missing/multiple tags, malformed HTML, non-HTML
-responses, encoding fallback, declared charset, frames versus iframe, plugin markup,
-link/resource host ownership, meta refresh, image-only accessible names, and truncated/challenge/error
-bodies that stay incomplete. HTML metadata fixtures cover missing versus empty titles
-and descriptions, duplicate groups with canonical/indexability context, quoted
-thresholds, headings, viewport width, doctype, oversized HTML, and URL-set comparison
-against the historical 5/73 totals without fabricating storefront URLs. Link/URL-shape
-fixtures cover referring page plus original anchor plus target status, external 403 as an
-access limitation, content-type-based resources-as-page-links without Semrush parity, the
->200 character baseline, quoted heuristic thresholds, and incomplete evidence when a
-target was not fetched. Crawl-depth fixtures cover diamond/cycle/disconnected shortest paths,
-canonical/asset/sitemap edges that never count as inbound, a reproducible homepage path in
-depth findings, coverage-qualified sitemap orphan summaries, and duplicate/out-of-scope sitemap URLs that do not multiply findings. Hreflang fixtures cover multi-locale
-and `x-default` clusters, absent return links, inaccessible targets, invalid BCP 47 tags, source
-conflicts, `html lang` without hreflang on a single-language page, content-language heuristic
-confidence, and unsigned cross-host locale fetches that never attach credentials. Structured-data fixtures cover JSON-LD arrays and `@graph`, multiple offers, malformed JSON, missing required properties, Microdata/RDFa inventory that does not pass, unsupported types, and recommendations that do not promise Google rich results or appearance. Export fixtures cover quotes, Unicode,
-formula injection, stable finding identities, coverage reconciliation, secret refusal, and
-read-only CSV import that separates aggregate counts from entity rows and historical deltas.
-The Semrush workbook adapter stays blocked without inspecting unsupplied XLSX bytes. Scoped-audit validation fixtures account for every discovered URL without forcing equality to 3,725, classify excluded baseline URLs, flag unexplained fetched misses only when entity rows exist, pin currently passing metadata checks, and re-evaluate a fixed duplicate-description pair from stored observations. They do not contact the storefront.
+Do **not** `cargo publish` these crates from a personal crates.io account.
+`publish = false` is intentional. If a later issue enables registry
+publication, use a TiendaCables GitHub identity (or a dedicated company user),
+add the org team as crate owners, and keep personal crates.io credentials off
+this repository.
 
-A user-reported or local crawl is operator evidence only. It is not recorded in
-this repository, is not covered by the default `cargo test` run, and is not proof that
-Shopify accepted the signature or that a crawl is ready. Optional
-`cargo test -p crawlytic-core live_tiendacables -- --ignored` contacts the live origin
-when credentials are already in the execution environment. Do not commit `.env`,
-`profile.local.toml`, SQLite files, or probe transcripts.
+## License
 
-References: https://ratatui.rs/ and
-https://help.shopify.com/en/manual/promoting-marketing/seo/crawling-your-store
+[MIT](LICENSE) © 2026 TiendaCables.
+
+References: [Ratatui](https://ratatui.rs/) ·
+[Shopify: crawling your store](https://help.shopify.com/en/manual/promoting-marketing/seo/crawling-your-store)
