@@ -6,6 +6,7 @@ mod discovery;
 mod engine;
 mod exchange;
 mod extract;
+mod history;
 mod https;
 mod profile;
 mod robots;
@@ -47,6 +48,11 @@ pub use extract::{
     EXTRACTION_SCHEMA_VERSION, EmbeddedKind, ExtractHeader, ExtractInput, ExtractedObservations,
     Heading, HostOwner, Hreflang, LinkObservation, ObservationFlags, PageObservation, RedirectHop,
     ResourceFetch, ResourceObservation, StructuredBlock, StructuredFormat, extract,
+};
+pub use history::{
+    CURRENT_TOTAL_SEMANTICS, CompatibilityKind, CompatibilityNote, CountSummary, FindingChange,
+    FindingDelta, GroupKind, HISTORICAL_DELTA_SEMANTICS, IssueGroup, RunComparison, RunView,
+    compare_runs,
 };
 pub use https::{
     DEFAULT_DAYS_BEFORE_EXPIRY, HostProbe, HostProbeKind, MIXED_CONTENT_DYNAMIC_COVERAGE,

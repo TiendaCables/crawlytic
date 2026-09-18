@@ -5,8 +5,12 @@
 //! quota-bounded. Writer statements share a transaction until the batch limit
 //! is reached or `flush` is called.
 
-use crate::audit::{AuditReport, Suppression, SuppressionAction, SuppressionEvent};
+use crate::audit::{
+    AuditReport, EvidencePointer, Finding, FindingId, RULE_CONFIG_VERSION, RuleOutcome,
+    Suppression, SuppressionAction, SuppressionEvent,
+};
 use crate::catalogue::{CATALOGUE_VERSION, FIXTURE_CONTRACT_VERSION};
+use crate::catalogue::{RuleState, Severity};
 use crate::crawl::{
     SitemapFileRecord, SitemapFileState, SitemapInventory, SitemapUrlRecord, UrlRecord, UrlState,
 };
@@ -15,6 +19,7 @@ use crate::extract::{
     ObservationFlags, PageObservation, RedirectHop, ResourceFetch, ResourceObservation,
     StructuredBlock, StructuredFormat,
 };
+use crate::history::{RunComparison, RunView, compare_runs as classify_runs};
 use crate::https::{HostProbe, HostProbeKind, TlsInspection};
 use crate::profile::Profile;
 use crate::robots::{RobotsFetchState, RobotsRunMetadata};
@@ -1501,6 +1506,47 @@ impl Store {
         list_runs_from(&inner.conn)
     }
 
+    pub fn load_audit_report(&self, run_id: i64) -> Result<AuditReport, StoreError> {
+        let inner = self.lock();
+        let suppressions = load_suppressions(&inner.conn, run_id)?;
+        load_audit_report_from(&inner.conn, run_id, &suppressions)
+    }
+
+    pub fn compare_runs(
+        &self,
+        baseline_run_id: i64,
+        later_run_id: i64,
+    ) -> Result<RunComparison, StoreError> {
+        let baseline = self.load_run(baseline_run_id)?;
+        let later = self.load_run(later_run_id)?;
+        let baseline_report = self.load_audit_report(baseline_run_id)?;
+        let later_report = self.load_audit_report(later_run_id)?;
+        let baseline_suppressions = self.suppressions(baseline_run_id)?;
+        let later_suppressions = self.suppressions(later_run_id)?;
+        Ok(classify_runs(
+            &RunView {
+                run_id: baseline.id,
+                completed: baseline.completed,
+                cancelled: baseline.cancelled,
+                catalogue_version: baseline.catalogue_version,
+                profile: &baseline.profile,
+                urls: &baseline.urls,
+                report: &baseline_report,
+                suppressions: &baseline_suppressions,
+            },
+            &RunView {
+                run_id: later.id,
+                completed: later.completed,
+                cancelled: later.cancelled,
+                catalogue_version: later.catalogue_version,
+                profile: &later.profile,
+                urls: &later.urls,
+                report: &later_report,
+                suppressions: &later_suppressions,
+            },
+        ))
+    }
+
     #[cfg(test)]
     fn limit_pages_to_current(&self) -> Result<(), StoreError> {
         let mut inner = self.lock();
@@ -2347,6 +2393,120 @@ fn split_lines(value: &str) -> Vec<String> {
     } else {
         value.split('\n').map(str::to_owned).collect()
     }
+}
+
+fn load_audit_report_from(
+    conn: &Connection,
+    run_id: i64,
+    suppressions: &[Suppression],
+) -> Result<AuditReport, StoreError> {
+    let evaluation: Option<(i64, String)> = conn
+        .query_row(
+            "SELECT config_version, config_fingerprint FROM audit_evaluations
+             WHERE run_id = ?1 ORDER BY seq DESC LIMIT 1",
+            params![run_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(map_write)?;
+    let (config_version, config_fingerprint) =
+        evaluation.unwrap_or((i64::from(RULE_CONFIG_VERSION), String::new()));
+    let outcomes = load_rule_outcomes(conn, run_id)?;
+    let findings = load_audit_findings(conn, run_id, suppressions)?;
+    Ok(AuditReport {
+        run_id,
+        config_version: config_version as u32,
+        config_fingerprint,
+        outcomes,
+        findings,
+    })
+}
+
+fn load_rule_outcomes(conn: &Connection, run_id: i64) -> Result<Vec<RuleOutcome>, StoreError> {
+    let mut stmt = conn
+        .prepare("SELECT rule_id, state FROM rule_outcomes WHERE run_id = ?1 ORDER BY rule_id")
+        .map_err(map_write)?;
+    let rows = stmt
+        .query_map(params![run_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(map_write)?;
+    let mut outcomes = Vec::new();
+    for row in rows {
+        let (rule_id, state) = row.map_err(map_write)?;
+        let state = RuleState::parse(&state)
+            .ok_or_else(|| StoreError::other(format!("Unknown rule state {state}")))?;
+        outcomes.push(RuleOutcome { rule_id, state });
+    }
+    Ok(outcomes)
+}
+
+fn load_audit_findings(
+    conn: &Connection,
+    run_id: i64,
+    suppressions: &[Suppression],
+) -> Result<Vec<Finding>, StoreError> {
+    let records = load_findings(conn, run_id)?;
+    let evidence = load_all_finding_evidence(conn, run_id)?;
+    let mut findings = Vec::new();
+    for record in records {
+        let pointers = evidence
+            .get(&(record.rule_id.clone(), record.entity_key.clone()))
+            .cloned()
+            .unwrap_or_default();
+        let suppressed = suppressions
+            .iter()
+            .any(|suppression| suppression.matches(&record.rule_id, &record.entity_key));
+        findings.push(Finding {
+            id: FindingId::new(&record.rule_id, &record.entity_key),
+            catalogue_version: record.catalogue_version,
+            config_version: record.config_version,
+            severity: Severity::parse(&record.severity).unwrap_or(Severity::Notice),
+            state: RuleState::parse(&record.state).unwrap_or(RuleState::Findings),
+            fact: record.fact,
+            recommendation: record.recommendation,
+            evidence: pointers,
+            suppressed,
+        });
+    }
+    Ok(findings)
+}
+
+fn load_all_finding_evidence(
+    conn: &Connection,
+    run_id: i64,
+) -> Result<std::collections::BTreeMap<(String, String), Vec<EvidencePointer>>, StoreError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT rule_id, entity_key, observation_identity, field, excerpt
+             FROM finding_evidence WHERE run_id = ?1
+             ORDER BY rule_id, entity_key, seq",
+        )
+        .map_err(map_write)?;
+    let rows = stmt
+        .query_map(params![run_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })
+        .map_err(map_write)?;
+    let mut evidence = std::collections::BTreeMap::new();
+    for row in rows {
+        let (rule_id, entity_key, observation_identity, field, excerpt) = row.map_err(map_write)?;
+        evidence
+            .entry((rule_id, entity_key))
+            .or_insert_with(Vec::new)
+            .push(EvidencePointer {
+                observation_identity,
+                field,
+                excerpt,
+            });
+    }
+    Ok(evidence)
 }
 
 fn load_findings(conn: &Connection, run_id: i64) -> Result<Vec<FindingRecord>, StoreError> {

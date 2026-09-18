@@ -36,6 +36,7 @@ pub fn render(frame: &mut Frame, app: &App) {
             Screen::Run => render_run(frame, body, app),
             Screen::Urls => render_urls(frame, body, app),
             Screen::Findings => render_findings(frame, body, app),
+            Screen::History => render_history(frame, body, app),
         }
     }
     if footer.height > 0 {
@@ -87,6 +88,7 @@ fn render_tabs(frame: &mut Frame, area: Rect, app: &App) {
                 Screen::Run => "3 Run",
                 Screen::Urls => "4 URLs",
                 Screen::Findings => "5 Findings",
+                Screen::History => "6 History",
             };
             if screen == app.screen {
                 Span::styled(
@@ -111,7 +113,7 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
         format!("Filter: {}_   Esc clear  Enter keep", app.filter)
     } else {
         format!(
-            "1-5 screens  / filter  s start  x cancel  r resume  o export  ? help  q quit{filter}"
+            "1-6 screens  / filter  s start  x cancel  r resume  o export  ? help  q quit{filter}"
         )
     };
     frame.render_widget(Paragraph::new(text), area);
@@ -474,6 +476,39 @@ fn finding_detail_lines(app: &App) -> Vec<Line<'static>> {
         Line::from("No live findings selected."),
         Line::from("Nothing here is a placeholder score or a fabricated live result."),
     ]
+}
+
+fn render_history(frame: &mut Frame, area: Rect, app: &App) {
+    let mut lines = Vec::new();
+    if let Some(history) = &app.history {
+        for line in history.summary_lines() {
+            lines.push(Line::from(line));
+        }
+        for delta in history.deltas.iter().take(12) {
+            lines.push(Line::from(format!(
+                "  {} {}::{}",
+                delta.change.as_str(),
+                delta.id.rule_id,
+                delta.id.entity_key
+            )));
+        }
+    } else {
+        lines.push(Line::from(
+            "Evaluate two runs to compare new, persistent and resolved findings.",
+        ));
+        lines.push(Line::from(
+            "Current totals count the later run. Historical deltas use the baseline run as denominator.",
+        ));
+        lines.push(Line::from(
+            "Incomplete later runs never resolve unvisited findings.",
+        ));
+    }
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(Block::bordered().title(" Run history ")),
+        area,
+    );
 }
 
 fn render_overlay(frame: &mut Frame, area: Rect, app: &App) {
