@@ -1,6 +1,7 @@
 use crawlytic_core::{
-    CrawlLimits, EXIT_USAGE, HeadlessReport, HeadlessRequest, Profile, ScheduleExec,
-    ScheduleGuidance, SchedulePlan, Store, default_lock_path, run_audit,
+    CrawlLimits, EXIT_USAGE, HeadlessReport, HeadlessRequest, Profile, RetentionPolicy,
+    ScheduleExec, ScheduleGuidance, SchedulePlan, Store, default_lock_path, release_coverage_json,
+    run_audit,
 };
 use std::path::{Path, PathBuf};
 
@@ -11,6 +12,10 @@ Usage:
   crawlytic [profile.toml]     Interactive Ratatui UI
   crawlytic audit [options]    Noninteractive crawl + evaluate + CSV/JSON export
   crawlytic schedule print     Print systemd timer/service and crontab (does not install)
+  crawlytic coverage           Secret-free supported/deferred rule coverage JSON
+  crawlytic backup --out PATH  Consistent SQLite snapshot for restore
+  crawlytic retention print    Show raw-HTML retention settings
+  crawlytic retention set      Set --retain-raw-html and --max-html-bytes
   crawlytic help
 
 Audit options:
@@ -30,6 +35,13 @@ Schedule print options:
   --env-file PATH
   --json
 
+Backup / retention options:
+  --store PATH
+  --out PATH           Backup destination (must not exist)
+  --retain-raw-html    Keep sampled HTML in the store (off unless set)
+  --max-html-bytes N   Quota when raw HTML retention is on
+
+Install with cargo from this git repository. This binary does not publish crates.
 Exit codes: 0 ok, 1 usage, 2 auth, 3 overlap, 4 crawl, 5 export.
 Overlapping runs are prevented, not queued. Email stays disabled.
 A schedule is not enabled until schedule_time and schedule_timezone are set.
@@ -40,6 +52,10 @@ pub enum Invocation {
     Tui { selected: Option<String> },
     Audit(AuditArgs),
     SchedulePrint(ScheduleArgs),
+    Coverage,
+    Backup(BackupArgs),
+    RetentionPrint(RetentionPrintArgs),
+    RetentionSet(RetentionSetArgs),
     Help,
 }
 
@@ -63,6 +79,23 @@ pub struct ScheduleArgs {
     pub json: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackupArgs {
+    pub store: PathBuf,
+    pub out: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetentionPrintArgs {
+    pub store: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetentionSetArgs {
+    pub store: PathBuf,
+    pub policy: RetentionPolicy,
+}
+
 pub fn parse_args(
     args: &[String],
     cwd: &Path,
@@ -72,6 +105,9 @@ pub fn parse_args(
         None => Ok(Invocation::Tui { selected: None }),
         Some("help" | "-h" | "--help") => Ok(Invocation::Help),
         Some("audit") => parse_audit(&args[1..], cwd, store_env).map(Invocation::Audit),
+        Some("coverage") => parse_coverage(&args[1..]).map(|()| Invocation::Coverage),
+        Some("backup") => parse_backup(&args[1..], cwd, store_env).map(Invocation::Backup),
+        Some("retention") => parse_retention(&args[1..], cwd, store_env),
         Some("schedule") => match args.get(1).map(String::as_str) {
             Some("print") => {
                 parse_schedule(&args[2..], cwd, store_env).map(Invocation::SchedulePrint)
@@ -187,6 +223,111 @@ fn default_store(cwd: &Path, store_env: Option<&str>) -> PathBuf {
         .unwrap_or_else(|| cwd.join("crawlytic.sqlite"))
 }
 
+fn parse_coverage(args: &[String]) -> Result<(), String> {
+    if let Some(other) = args.first() {
+        return Err(format!("Unknown coverage option {other}"));
+    }
+    Ok(())
+}
+
+fn parse_backup(
+    args: &[String],
+    cwd: &Path,
+    store_env: Option<&str>,
+) -> Result<BackupArgs, String> {
+    let mut store = None;
+    let mut out = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--store" => store = Some(required_value(args, &mut i, "--store")?),
+            "--out" => out = Some(required_value(args, &mut i, "--out")?),
+            other => return Err(format!("Unknown backup option {other}")),
+        }
+    }
+    let out = out.ok_or_else(|| "backup requires --out PATH".to_owned())?;
+    Ok(BackupArgs {
+        store: store.unwrap_or_else(|| default_store(cwd, store_env)),
+        out,
+    })
+}
+
+fn parse_retention(
+    args: &[String],
+    cwd: &Path,
+    store_env: Option<&str>,
+) -> Result<Invocation, String> {
+    match args.first().map(String::as_str) {
+        Some("print") => {
+            let store = parse_store_only(&args[1..], cwd, store_env)?;
+            Ok(Invocation::RetentionPrint(RetentionPrintArgs { store }))
+        }
+        Some("set") => {
+            parse_retention_set(&args[1..], cwd, store_env).map(Invocation::RetentionSet)
+        }
+        Some(other) => Err(format!(
+            "Unknown retention subcommand {other}. Use: crawlytic retention print|set"
+        )),
+        None => Err("Usage: crawlytic retention print|set".into()),
+    }
+}
+
+fn parse_store_only(
+    args: &[String],
+    cwd: &Path,
+    store_env: Option<&str>,
+) -> Result<PathBuf, String> {
+    let mut store = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--store" => store = Some(required_value(args, &mut i, "--store")?),
+            other => return Err(format!("Unknown retention option {other}")),
+        }
+    }
+    Ok(store.unwrap_or_else(|| default_store(cwd, store_env)))
+}
+
+fn parse_retention_set(
+    args: &[String],
+    cwd: &Path,
+    store_env: Option<&str>,
+) -> Result<RetentionSetArgs, String> {
+    let mut store = None;
+    let mut retain_raw_html = false;
+    let mut max_html_bytes = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--store" => store = Some(required_value(args, &mut i, "--store")?),
+            "--retain-raw-html" => {
+                retain_raw_html = true;
+                i += 1;
+            }
+            "--max-html-bytes" => {
+                let raw = args
+                    .get(i + 1)
+                    .ok_or_else(|| "--max-html-bytes requires a number".to_owned())?;
+                let value = raw
+                    .parse::<u64>()
+                    .map_err(|_| format!("invalid --max-html-bytes {raw}"))?;
+                max_html_bytes = Some(value);
+                i += 2;
+            }
+            other => return Err(format!("Unknown retention option {other}")),
+        }
+    }
+    let max_html_bytes =
+        max_html_bytes.ok_or_else(|| "retention set requires --max-html-bytes N".to_owned())?;
+    Ok(RetentionSetArgs {
+        store: store.unwrap_or_else(|| default_store(cwd, store_env)),
+        policy: RetentionPolicy {
+            retain_raw_html,
+            max_html_bytes,
+        },
+    })
+}
+
 pub fn usage_report(message: impl Into<String>) -> HeadlessReport {
     HeadlessReport {
         ok: false,
@@ -247,6 +388,44 @@ pub fn render_schedule(args: ScheduleArgs) -> anyhow::Result<String> {
 fn load_profile(path: &Path) -> anyhow::Result<Profile> {
     let text = std::fs::read_to_string(path)?;
     Profile::load(&text)
+}
+
+pub fn render_coverage() -> anyhow::Result<String> {
+    Ok(release_coverage_json()?)
+}
+
+pub fn run_backup(args: BackupArgs) -> anyhow::Result<String> {
+    let store = Store::open(&args.store)?;
+    store.backup(&args.out)?;
+    Ok(serde_json::json!({
+        "ok": true,
+        "kind": "backup",
+        "store": args.store.to_string_lossy(),
+        "out": args.out.to_string_lossy(),
+    })
+    .to_string())
+}
+
+pub fn render_retention(args: RetentionPrintArgs) -> anyhow::Result<String> {
+    let store = Store::open(&args.store)?;
+    let policy = store.retention();
+    Ok(serde_json::json!({
+        "retain_raw_html": policy.retain_raw_html,
+        "max_html_bytes": policy.max_html_bytes,
+    })
+    .to_string())
+}
+
+pub fn run_retention_set(args: RetentionSetArgs) -> anyhow::Result<String> {
+    let store = Store::open(&args.store)?;
+    store.set_retention(args.policy)?;
+    Ok(serde_json::json!({
+        "ok": true,
+        "kind": "retention",
+        "retain_raw_html": args.policy.retain_raw_html,
+        "max_html_bytes": args.policy.max_html_bytes,
+    })
+    .to_string())
 }
 
 #[cfg(test)]
@@ -337,5 +516,77 @@ mod tests {
         assert_eq!(report.exit_code, EXIT_USAGE);
         assert!(!report.email);
         assert!(json.contains("\"kind\": \"usage\""));
+    }
+
+    #[test]
+    fn coverage_is_secret_free_and_lists_supported_and_deferred_rules() {
+        let cwd = Path::new("/work");
+        let Invocation::Coverage = parse_args(&args(&["coverage"]), cwd, None).unwrap() else {
+            panic!("expected coverage");
+        };
+        let json = render_coverage().unwrap();
+        assert!(json.contains("\"supported\""), "{json}");
+        assert!(json.contains("\"deferred\""), "{json}");
+        assert!(
+            json.contains("meta.missing_title") || json.contains("checker"),
+            "{json}"
+        );
+        assert!(
+            json.contains("amp.hidden_catalogue") || json.contains("deferred"),
+            "{json}"
+        );
+        let lowered = json.to_ascii_lowercase();
+        for needle in [
+            "crawl_signature",
+            "signature-input",
+            "signature_agent",
+            "password",
+            "authorization",
+        ] {
+            assert!(!lowered.contains(needle), "{needle} leaked in {json}");
+        }
+        assert!(HELP.contains("coverage"));
+        assert!(HELP.contains("does not publish crates"));
+    }
+
+    #[test]
+    fn backup_and_retention_default_to_the_store_path() {
+        let cwd = Path::new("/work");
+        let Invocation::Backup(backup) =
+            parse_args(&args(&["backup", "--out", "audit.sqlite"]), cwd, None).unwrap()
+        else {
+            panic!("expected backup");
+        };
+        assert_eq!(backup.store, PathBuf::from("/work/crawlytic.sqlite"));
+        assert_eq!(backup.out, PathBuf::from("audit.sqlite"));
+
+        let Invocation::RetentionPrint(print) =
+            parse_args(&args(&["retention", "print"]), cwd, None).unwrap()
+        else {
+            panic!("expected retention print");
+        };
+        assert_eq!(print.store, PathBuf::from("/work/crawlytic.sqlite"));
+
+        let Invocation::RetentionSet(set) = parse_args(
+            &args(&[
+                "retention",
+                "set",
+                "--retain-raw-html",
+                "--max-html-bytes",
+                "4096",
+            ]),
+            cwd,
+            Some("/var/lib/crawlytic.sqlite"),
+        )
+        .unwrap() else {
+            panic!("expected retention set");
+        };
+        assert_eq!(set.store, PathBuf::from("/var/lib/crawlytic.sqlite"));
+        assert!(set.policy.retain_raw_html);
+        assert_eq!(set.policy.max_html_bytes, 4096);
+        assert!(HELP.contains("backup"));
+        assert!(HELP.contains("retention"));
+        assert!(!HELP.to_ascii_lowercase().contains("pacman"));
+        assert!(!HELP.to_ascii_lowercase().contains("crates.io"));
     }
 }

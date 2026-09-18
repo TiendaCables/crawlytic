@@ -2,6 +2,10 @@
 name = "crawlytic"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Self-hosted technical SEO auditor with a Ratatui interface"
 publish.workspace = true
 
 [dependencies]
@@ -9,5 +13,6 @@ crawlytic-core = { path = "../crawlytic-core" }
 anyhow = "1"
 ratatui = "0.30"
 crossterm = "0.29"
+serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
 url = { version = "2", features = ["serde"] }

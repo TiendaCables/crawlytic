@@ -33,6 +33,22 @@ pub fn run() -> anyhow::Result<()> {
             }
             Ok(())
         }
+        Ok(Invocation::Coverage) => {
+            print!("{}", cli::render_coverage()?);
+            Ok(())
+        }
+        Ok(Invocation::Backup(backup)) => {
+            println!("{}", cli::run_backup(backup)?);
+            Ok(())
+        }
+        Ok(Invocation::RetentionPrint(print)) => {
+            println!("{}", cli::render_retention(print)?);
+            Ok(())
+        }
+        Ok(Invocation::RetentionSet(set)) => {
+            println!("{}", cli::run_retention_set(set)?);
+            Ok(())
+        }
         Ok(Invocation::SchedulePrint(print)) => {
             println!("{}", cli::render_schedule(print)?);
             Ok(())

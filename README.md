@@ -2,9 +2,60 @@
 
 A self-hosted technical SEO auditor with a Ratatui interface.
 
+Product name: **Crawlytic**. License: [MIT](LICENSE). Repository:
+[`TiendaCables/crawlytic`](https://github.com/TiendaCables/crawlytic) (public GitHub org).
+Workspace crates stay unpublished (`publish = false`). This tree does not publish
+to a crate registry, ship a distribution package, or cancel any subscription.
+
+## Install
+
+Supported install is **cargo from this repository**, not a distro package.
+Need a stable Rust toolchain 1.89+ (edition 2024). From a clone:
+
+```sh
+cargo install --path crates/crawlytic --locked
+```
+
+From git (same binary; still not a registry publish):
+
+```sh
+cargo install --git https://github.com/TiendaCables/crawlytic.git --locked crawlytic
+```
+
+Then `crawlytic` is on `PATH`. Copy `.env.example` to `.env` and
+`profile.example.toml` to `profile.local.toml` as below. Point the store with
+`--store` or `CRAWLYTIC_STORE` (default `./crawlytic.sqlite`).
+
+Restore an audit on a fresh machine after install:
+
+```sh
+crawlytic backup --store crawlytic.sqlite --out crawlytic.sqlite.bak
+# copy crawlytic.sqlite.bak, profile.local.toml, and .env to the new host
+# (never commit those files). Destination must not already exist.
+cp crawlytic.sqlite.bak crawlytic.sqlite
+crawlytic audit --profile profile.local.toml --store crawlytic.sqlite --json
+```
+
+Prefer `crawlytic backup` over copying a live WAL file (`*.sqlite-wal`). Opening
+an older store applies schema migrations and keeps existing runs and findings.
+Back up before upgrading the binary.
+
+Raw HTML retention is off by default and quota-bounded when enabled:
+
+```sh
+crawlytic retention print --store crawlytic.sqlite
+crawlytic retention set --store crawlytic.sqlite --max-html-bytes 10485760 --retain-raw-html
+```
+
+Secret-free supported/deferred rule coverage (also a CI artifact):
+
+```sh
+crawlytic coverage
+```
+
 ## Run
 
-Install a current stable Rust toolchain. From this directory:
+From a checkout (no install required):
 
 ```sh
 cargo run -p crawlytic
@@ -213,18 +264,33 @@ historical observation (not an invariant); homepage-link discovery; JS off; craw
 delay minimum (no numeric rate); weekly Monday intent (time/timezone operator-chosen before a timer is enabled); robots/meta bypass off;
 Web Bot Auth required; 27 ignored parameters and 21 excluded paths captured.
 
+## Publication
+
+Do **not** `cargo publish` these crates from a personal crates.io account.
+`publish = false` is intentional for this first supported release. Install is
+`cargo install --git` / `--path` from the company GitHub org.
+
+If a later issue enables registry publication: log in to crates.io with a
+**TiendaCables** GitHub identity (or a dedicated company user), add the GitHub
+org team as crate owners, store the publish token in org CI secrets, and keep
+personal crates.io credentials off this repository. Transferring a crate that
+was first published under a personal username is possible and messy; skip that
+path. Publishing is not required to install or restore an audit.
+
 ## Verification
 
-Automated (does not contact the storefront):
+Automated (does not contact the storefront). GitHub Actions on `main` and pull
+requests runs the same commands and uploads `rule-coverage.json`:
 
 ```sh
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo build --workspace --all-targets
 cargo test --workspace
+cargo run -p crawlytic -- coverage
 ```
 
-Terminal smoke test on Arch Linux (interactive; `q` / Esc / Ctrl-C to quit).
+Terminal smoke test (interactive; `q` / Esc / Ctrl-C to quit).
 The TUI starts without sending requests. Press `s` only when you intend a live crawl.
 Deterministic TUI fixtures cover keyboard navigation, filtering during a running session,
 masked credentials, small terminals, event floods, grouped findings with evidence/inlinks,

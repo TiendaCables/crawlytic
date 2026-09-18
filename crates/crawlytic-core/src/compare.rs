@@ -39,6 +39,10 @@ const ENGINE_COVERED: &[(&str, &str)] = &[
     ),
 ];
 
+pub fn is_engine_covered(rule_id: &str) -> bool {
+    ENGINE_COVERED.iter().any(|(id, _)| *id == rule_id)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum UrlDisposition {
     Fetched,

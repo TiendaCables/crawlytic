@@ -11,6 +11,7 @@ mod headless;
 mod history;
 mod https;
 mod profile;
+mod release;
 mod robots;
 mod rules;
 mod schedule;
@@ -35,7 +36,7 @@ pub use catalogue::{
 pub use compare::{
     COMPARISON_USER_AGENT, MatrixClass, MatrixImpact, MatrixRow, OperationalPrerequisite,
     RemainingGap, ReplacementClaim, SNAPSHOT_PAGE_COUNT, UrlAccount, UrlDisposition,
-    ValidationInput, ValidationReport, counts_by_disposition, high_impact_rules,
+    ValidationInput, ValidationReport, counts_by_disposition, high_impact_rules, is_engine_covered,
     passing_regression_rule_ids, validate_scoped_audit,
 };
 pub use crawl::{
@@ -74,6 +75,10 @@ pub use https::{
 pub use profile::{
     CrawlDelay, DiscoveryMode, IgnoredParameterMode, Profile, ProfileRole, SCHEMA_VERSION,
     ScheduleCadence, Weekday,
+};
+pub use release::{
+    CoverageEntry, CoverageKind, LICENSE, PRODUCT_NAME, REPOSITORY, ReleaseCoverage,
+    release_coverage_json, rule_coverage,
 };
 pub use robots::{
     AllowReason, BlockKind, BlockedEvidence, RobotsCache, RobotsFetchState, RobotsFile,
