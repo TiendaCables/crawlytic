@@ -87,7 +87,10 @@ skip_parameters = [
   "_ss",
 ]
 
-# Weekly Monday intent only. Time and timezone are unspecified; no scheduler.
+# Weekly Monday intent only. Set both schedule_time (HH:MM) and
+# schedule_timezone (IANA, e.g. Europe/Madrid) before `crawlytic schedule print`.
+# Printing or installing a timer is refused until those are chosen.
+# completion_email stays false; no messages are sent.
 schedule_cadence = "weekly"
 schedule_weekday = "monday"
 completion_email = false
