@@ -330,6 +330,7 @@ dependencies = [
  "crawlytic-core",
  "crossterm",
  "ratatui",
+ "serde_json",
  "tokio",
  "url",
 ]

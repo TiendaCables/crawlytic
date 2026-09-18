@@ -643,6 +643,28 @@ impl Store {
         inner.commit()
     }
 
+    pub fn retention(&self) -> RetentionPolicy {
+        self.lock().retention
+    }
+
+    /// Write a consistent SQLite snapshot with `VACUUM INTO`.
+    /// The destination must not already exist. Secrets never enter the store.
+    pub fn backup(&self, dest: &Path) -> Result<(), StoreError> {
+        let dest_str = dest
+            .to_str()
+            .ok_or_else(|| StoreError::other("backup destination is not valid UTF-8"))?;
+        if dest_str.is_empty() {
+            return Err(StoreError::other("backup destination is required"));
+        }
+        let mut inner = self.lock();
+        inner.commit()?;
+        inner
+            .conn
+            .execute("VACUUM INTO ?1", params![dest_str])
+            .map_err(map_write)?;
+        Ok(())
+    }
+
     pub fn begin_run(&self, profile: &Profile) -> Result<i64, StoreError> {
         let toml = serialize_profile(profile)?;
         let mut inner = self.lock();
@@ -3475,5 +3497,109 @@ mod tests {
         let loaded = store.load_run(run_id).unwrap();
         assert!(!loaded.observations[0].page.is_complete());
         assert!(loaded.observations[0].page.flags.truncated);
+    }
+
+    #[test]
+    fn schema_upgrade_preserves_existing_run_data() {
+        let path = temp_path();
+        let profile = include_str!("../../../profile.example.toml");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(MIGRATION_1).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    applied_at INTEGER NOT NULL
+                );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES (1, 0)",
+                [],
+            )
+            .unwrap();
+            conn.execute("INSERT INTO profiles(id, toml) VALUES (1, ?1)", [profile])
+                .unwrap();
+            conn.execute(
+                "INSERT INTO runs(
+                    id, profile_id, catalogue_version, fixture_contract_version,
+                    status, completed, cancelled, sitemap_done, started_at, updated_at
+                 ) VALUES (1, 1, 1, 1, 'completed', 1, 0, 1, 1, 1)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO url_states(
+                    run_id, record_key, original, identity, state, reason,
+                    click_depth, via_website, via_sitemap
+                 ) VALUES (1, 'https://www.tiendacables.com/',
+                    'https://www.tiendacables.com/',
+                    'https://www.tiendacables.com/', 'fetched', 'fetched', 0, 1, 0)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO findings(run_id, rule_id, entity_key, evidence)
+                 VALUES (1, 'meta.missing_title', 'https://www.tiendacables.com/', 'title missing')",
+                [],
+            )
+            .unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        let runs = store.list_runs().unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].id, 1);
+        assert_eq!(runs[0].status, RunStatus::Completed);
+        let findings = store.findings(1).unwrap();
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].rule_id, "meta.missing_title");
+        assert_eq!(findings[0].evidence, "title missing");
+        assert_eq!(findings[0].fact, "title missing");
+        cleanup(&path);
+    }
+
+    #[test]
+    fn backup_restores_an_audit_without_copying_secrets() {
+        let path = temp_path();
+        let dest = temp_path();
+        let store = Store::open(&path).unwrap();
+        let run_id = store.begin_run(&sample_profile()).unwrap();
+        store
+            .put_finding(
+                run_id,
+                "meta.missing_title",
+                "https://www.tiendacables.com/",
+                "title missing",
+            )
+            .unwrap();
+        store
+            .set_retention(RetentionPolicy {
+                retain_raw_html: true,
+                max_html_bytes: 2048,
+            })
+            .unwrap();
+        store.flush().unwrap();
+        store.backup(&dest).unwrap();
+        drop(store);
+
+        let restored = Store::open(&dest).unwrap();
+        let findings = restored.findings(run_id).unwrap();
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].evidence, "title missing");
+        assert_eq!(
+            restored.retention(),
+            RetentionPolicy {
+                retain_raw_html: true,
+                max_html_bytes: 2048,
+            }
+        );
+        let dump = std::fs::read(&dest).unwrap();
+        let text = String::from_utf8_lossy(&dump);
+        let lower = text.to_ascii_lowercase();
+        assert!(text.contains("CRAWL_SIGNATURE"));
+        assert!(!lower.contains("sig1="));
+        assert!(!text.contains("TESTSIGNATUREVALUE"));
+        cleanup(&path);
+        cleanup(&dest);
     }
 }
